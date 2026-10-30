@@ -1,0 +1,372 @@
+import contextlib
+import copy
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import secrets
+import subprocess
+import tempfile
+import threading
+import types
+import unittest
+from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.request import urlopen
+
+import yaml
+import manager as m
+
+
+class ManagerTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.state = self.root / 'state'
+        self.state.mkdir()
+        self.conf = self.root / 'wg-stash.conf'
+        self.patches = [patch.object(m, 'STATE', self.state), patch.object(m, 'WG_CONF', self.conf),
+                        patch.object(m.grp, 'getgrnam', return_value=types.SimpleNamespace(gr_gid=os.getgid()))]
+        for item in self.patches:
+            item.start()
+        self.settings = {'endpoint': '203.0.113.8', 'server_private': 'SERVER_PRIVATE',
+                         'server_public': 'SERVER_PUBLIC', 'rules_source': m.SOURCE}
+        m.save('settings.json', self.settings)
+        m.save('clients.json', {})
+        m.save('rules.json', {'rules': m.SEED, 'updated': 'seed', 'source': 'seed'})
+        m.atomic(self.state / 'domains.txt', '# Test suffixes\n')
+        self.conf.write_text(m.render_wg(self.settings, {}))
+        self.calls = []
+
+    def tearDown(self):
+        for item in reversed(self.patches):
+            item.stop()
+        self.temp.cleanup()
+
+    def fake_run(self, *args, data=None):
+        self.calls.append(args)
+        if args == ('wg', 'genkey'):
+            return 'PRIVATE_' + secrets.token_hex(4)
+        if args == ('wg', 'pubkey'):
+            return 'PUBLIC_' + hashlib.sha256(data.encode()).hexdigest()
+        if args[:2] == ('wg-quick', 'strip'):
+            return self.conf.read_text()
+        if args[:2] == ('wg', 'syncconf'):
+            return ''
+        raise AssertionError(args)
+
+    def add(self, name):
+        with patch.object(m, 'run', side_effect=self.fake_run), contextlib.redirect_stdout(io.StringIO()):
+            m.add_client(name)
+
+    def test_distinct_keys_addresses_and_tokens(self):
+        self.add('AppleTV')
+        self.add('iPhone')
+        clients = m.load('clients.json')
+        self.assertEqual({c['ip'] for c in clients.values()}, {'10.88.0.2', '10.88.0.3'})
+        self.assertNotEqual(clients['AppleTV']['token'], clients['iPhone']['token'])
+        self.assertNotEqual(clients['AppleTV']['private'], clients['iPhone']['private'])
+        self.assertNotIn('PRIVATE_', self.conf.read_text())
+        self.assertEqual(self.conf.stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.state / 'clients.json').stat().st_mode & 0o777, 0o640)
+
+    def test_names_cannot_inject_config_or_paths(self):
+        for name in ('../x', 'a/b', 'a\\b', 'a\nb', '', '   ', '.', '..', 'a\tb', 'a\x7fb', 'x' * 65):
+            with self.assertRaises(ValueError):
+                self.add(name)
+        self.assertEqual(m.load('clients.json'), {})
+
+    def test_display_names_allow_spaces_apostrophes_and_unicode(self):
+        names = ["Waqaar's iPhone 18 Pro Max", 'Waqaars 18 Pro Max',
+                 'Family iPad (Home)', 'Waqaar’s Apple TV', 'Phone "Test"']
+        for name in names:
+            self.add(name)
+        self.assertEqual(set(m.load('clients.json')), set(names))
+        self.assertEqual(self.conf.read_text().count('\n[Peer]\n'), len(names))
+        for name in names:
+            self.assertIn('# ' + name + '\n', self.conf.read_text())
+
+    def test_duplicate_and_exhausted_pool_leave_state_unchanged(self):
+        self.add('TV')
+        before = self.conf.read_text()
+        with self.assertRaises(ValueError):
+            self.add('TV')
+        self.assertEqual(before, self.conf.read_text())
+        clients = {str(i): {'ip': '10.88.0.' + str(i)} for i in range(2, 255)}
+        m.save('clients.json', clients)
+        with self.assertRaisesRegex(ValueError, 'No free'):
+            self.add('other')
+
+    def test_failed_peer_sync_restores_config_and_client_database(self):
+        before = self.conf.read_text()
+        def failing(*args, data=None):
+            if args[:2] == ('wg', 'syncconf'):
+                raise subprocess.CalledProcessError(1, args)
+            return self.fake_run(*args, data=data)
+        with patch.object(m, 'run', side_effect=failing), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(subprocess.CalledProcessError):
+                m.add_client('TV')
+        self.assertEqual(self.conf.read_text(), before)
+        self.assertEqual(m.load('clients.json'), {})
+
+    def test_config_uses_local_endpoint_system_dns_direct_default(self):
+        self.add('TV')
+        client = m.load('clients.json')['TV']
+        config = m.make_config(self.settings, client)
+        self.assertEqual(config['proxies'][0]['server'], '203.0.113.8')
+        self.assertEqual(config['proxies'][0]['port'], 51821)
+        self.assertIn('203.0.113.8:8443/', config['rule-providers']['selected-service']['url'])
+        for option in ('nameserver', 'default-nameserver', 'proxy-server-nameserver'):
+            self.assertEqual(config['dns'][option], ['system'])
+        self.assertNotIn('fallback', config['dns'])
+        self.assertFalse(config['dns']['follow-rule'])
+        # Never reintroduce the dead resolver observed blocking YouTube.
+        self.assertNotIn('dns', config['proxies'][0])
+        self.assertEqual(config['rules'][-1], 'MATCH,DIRECT')
+        self.assertEqual(config['rule-providers']['selected-service']['interval'], 1800)
+        self.assertEqual(yaml.safe_load(yaml.safe_dump(config)), config)
+
+    def test_mihomo_trial_keeps_local_resolution_and_existing_peer(self):
+        self.add('Phone')
+        client = m.load('clients.json')['Phone']
+        config = m.make_mihomo_config(self.settings, client)
+        self.assertFalse(config['proxies'][0]['remote-dns-resolve'])
+        self.assertNotIn('dns', config['proxies'][0])
+        self.assertEqual(config['dns']['nameserver'], ['system'])
+        self.assertEqual(config['proxies'][0]['private-key'], client['private'])
+        self.assertEqual(config['proxies'][0]['persistent-keepalive'], 25)
+        self.assertEqual(config['rule-providers']['selected-service']['type'], 'http')
+        self.assertEqual(config['rules'][-1], 'MATCH,DIRECT')
+        self.assertEqual(yaml.safe_load(yaml.safe_dump(config)), config)
+
+    def test_opt_in_control_d_doh_and_system_restore(self):
+        self.add('Phone')
+        url = 'https://dns.controld.com/TEST_ONLY_ID'
+        with contextlib.redirect_stdout(io.StringIO()):
+            m.set_dns(url)
+        config = m.make_mihomo_config(m.load('settings.json'), m.load('clients.json')['Phone'])
+        for key in ('nameserver', 'direct-nameserver', 'proxy-server-nameserver'):
+            self.assertEqual(config['dns'][key], [url])
+        self.assertEqual(config['dns']['default-nameserver'], ['76.76.2.22'])
+        self.assertNotIn('fallback', config['dns'])
+        self.assertFalse(config['dns']['respect-rules'])
+        self.assertFalse(config['proxies'][0]['remote-dns-resolve'])
+        self.assertEqual(config['rules'][0], 'DOMAIN,dns.controld.com,DIRECT')
+        for bad in ('http://dns.controld.com/id', 'https://other.example/id',
+                    'https://dns.controld.com/id#proxy', 'https://dns.controld.com/'):
+            with self.assertRaises(ValueError):
+                m.set_dns(bad)
+            self.assertEqual(m.load('settings.json')['mihomo_doh'], url)
+        with contextlib.redirect_stdout(io.StringIO()):
+            m.set_dns('system')
+        self.assertNotIn('mihomo_doh', m.load('settings.json'))
+
+    def test_rule_validation_ignores_shared_ip_rules_and_rejects_injection(self):
+        rules = m.parse_rules('payload:\n - DOMAIN-SUFFIX,youtube.com\n - IP-CIDR,1.0.0.0/8\n')
+        self.assertEqual(rules, ['DOMAIN-SUFFIX,youtube.com'])
+        for body in ('payload: []', 'payload:\n - MATCH,DIRECT',
+                     'payload:\n - DOMAIN-SUFFIX,x.com,DIRECT',
+                     'payload:\n - DOMAIN-SUFFIX,*', 'payload:\n - 12'):
+            with self.assertRaises(ValueError):
+                m.parse_rules(body)
+
+    def test_failed_rule_download_keeps_previous_copy(self):
+        before = (self.state / 'rules.json').read_text()
+        with patch.object(m, 'urlopen', side_effect=OSError('network unavailable')):
+            with self.assertRaises(OSError):
+                m.refresh()
+        self.assertEqual((self.state / 'rules.json').read_text(), before)
+
+    def test_service_change_rolls_back_on_failed_refresh(self):
+        before = copy.deepcopy(m.load('settings.json'))
+        rules = copy.deepcopy(m.load('rules.json'))
+        with patch.object(m, 'urlopen', side_effect=OSError('network unavailable')):
+            with self.assertRaises(OSError):
+                m.select_service('netflix')
+        self.assertEqual(m.load('settings.json'), before)
+        self.assertEqual(m.load('rules.json'), rules)
+
+    def test_custom_service_retains_client_token_and_removes_youtube(self):
+        self.add('TV')
+        token = m.load('clients.json')['TV']['token']
+        m.atomic(self.state / 'domains.txt', 'netflix.com\n')
+        with contextlib.redirect_stdout(io.StringIO()):
+            m.select_service('custom')
+        self.assertEqual(m.current_rules(), ['DOMAIN-SUFFIX,netflix.com'])
+        self.assertEqual(m.load('clients.json')['TV']['token'], token)
+
+    def test_http_subscription_authentication_and_revocation(self):
+        self.add('TV')
+        token = m.load('clients.json')['TV']['token']
+        server = m.ThreadingHTTPServer(('127.0.0.1', 0), m.Gateway)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        base = 'http://127.0.0.1:' + str(server.server_port)
+        try:
+            with urlopen(base + '/s/' + token + '/config.yaml') as response:
+                document = yaml.safe_load(response.read())
+                self.assertEqual(response.headers['Cache-Control'], 'no-store')
+                self.assertEqual(document['proxies'][0]['private-key'], m.load('clients.json')['TV']['private'])
+            with urlopen(base + '/s/' + token + '/mihomo.yaml') as response:
+                document = yaml.safe_load(response.read())
+                self.assertFalse(document['proxies'][0]['remote-dns-resolve'])
+            with urlopen(base + '/s/' + token + '/rules.yaml') as response:
+                self.assertIn('DOMAIN-SUFFIX,youtube.com', yaml.safe_load(response.read())['payload'])
+            for path in ('/', '/settings.json', '/s/' + 'A' * 43 + '/config.yaml', '/s/' + token + '/../clients.json'):
+                with self.assertRaises(HTTPError) as error:
+                    urlopen(base + path)
+                self.assertEqual(error.exception.code, 404)
+            with patch('builtins.input', return_value='YES'), patch.object(m, 'run', side_effect=self.fake_run), contextlib.redirect_stdout(io.StringIO()):
+                m.remove_client('TV')
+            self.assertNotIn('[Peer]', self.conf.read_text())
+            with self.assertRaises(HTTPError) as error:
+                urlopen(base + '/s/' + token + '/config.yaml')
+            self.assertEqual(error.exception.code, 404)
+            with self.assertRaises(HTTPError) as error:
+                urlopen(base + '/s/' + token + '/mihomo.yaml')
+            self.assertEqual(error.exception.code, 404)
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join()
+
+    def test_firewall_reapply_and_cleanup_with_simulated_iptables(self):
+        bindir = self.root / 'bin'
+        bindir.mkdir()
+        statefile = self.root / 'iptables.json'
+        (bindir / 'ip').write_text('#!/bin/sh\necho "default via 192.0.2.1 dev eth0"\n')
+        (bindir / 'ip').chmod(0o755)
+        (bindir / 'iptables').write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+p=Path(os.environ['IPTABLES_SIMULATION'])
+d=json.loads(p.read_text()) if p.exists() else {'filter:INPUT':[], 'filter:FORWARD':[], 'nat:POSTROUTING':[]}
+a=sys.argv[1:]
+if '-w' in a: a.remove('-w')
+table='filter'
+if '-t' in a:
+    i=a.index('-t'); table=a[i+1]; del a[i:i+2]
+op,chain=a[:2]; rule=a[2:]; key=table+':'+chain
+if op=='-C': sys.exit(0 if rule in d.get(key,[]) else 1)
+if op=='-N':
+    if key in d: sys.exit(1)
+    d[key]=[]
+elif op=='-A': d[key].append(rule)
+elif op=='-I':
+    if rule and rule[0].isdigit(): rule=rule[1:]
+    d[key].insert(0,rule)
+elif op=='-D':
+    if rule not in d.get(key,[]): sys.exit(1)
+    d[key].remove(rule)
+elif op=='-F':
+    if key not in d: sys.exit(1)
+    d[key]=[]
+elif op=='-X':
+    if key not in d: sys.exit(1)
+    del d[key]
+else: sys.exit(2)
+p.write_text(json.dumps(d))
+''')
+        (bindir / 'iptables').chmod(0o755)
+        env = dict(os.environ, PATH=str(bindir) + ':' + os.environ['PATH'], IPTABLES_SIMULATION=str(statefile))
+        firewall = str(Path(m.__file__).with_name('firewall'))
+        subprocess.run(['bash', firewall, 'up'], env=env, check=True)
+        first = json.loads(statefile.read_text())
+        subprocess.run(['bash', firewall, 'up'], env=env, check=True)
+        self.assertEqual(first, json.loads(statefile.read_text()))
+        chain = first['filter:STASH_FORWARD']
+        accept_index = next(i for i, r in enumerate(chain) if r[-1] == 'ACCEPT')
+        for protocol in ('tcp', 'udp'):
+            dns_index = next(i for i, r in enumerate(chain) if protocol in r and '--dports' in r)
+            self.assertLess(dns_index, accept_index)
+            self.assertEqual(chain[dns_index][-1], 'REJECT')
+            self.assertIn('53,853', chain[dns_index])
+        self.assertEqual(chain[-1], ['-j', 'REJECT'])
+        nat = first['nat:POSTROUTING']
+        self.assertEqual(len(nat), 1)
+        self.assertIn('10.88.0.0/24', nat[0])
+        subprocess.run(['bash', firewall, 'down'], env=env, check=True)
+        for rules in json.loads(statefile.read_text()).values():
+            self.assertEqual(rules, [])
+
+    def nginx_route_trial(self, failure):
+        bindir = self.root / 'mock-bin'
+        bindir.mkdir()
+        nginx_dir = self.root / 'nginx'
+        (nginx_dir / 'conf.d').mkdir(parents=True)
+        stream = nginx_dir / 'stream.conf'
+        stream.write_text('stream { server { listen 443; proxy_pass $ssl_preread_server_name:443; } }\n')
+        before = stream.read_bytes()
+        logfile = self.root / 'service-actions'
+        (bindir / 'nginx').write_text('''#!/bin/sh
+if [ "$1" = '-T' ]; then
+    if [ "$NGINX_TRIAL_FAILURE" = 'config' ]; then echo 'invalid test configuration'; exit 1; fi
+    echo "# configuration file $NGINX_TRIAL_DIR/conf.d/stash-acme.conf:"
+fi
+exit 0
+''')
+        (bindir / 'systemctl').write_text('''#!/bin/sh
+echo "$*" >> "$NGINX_TRIAL_LOG"
+exit 0
+''')
+        (bindir / 'curl').write_text('''#!/bin/sh
+if [ "$NGINX_TRIAL_FAILURE" = 'transient' ]; then
+    count=0
+    [ ! -f "$NGINX_TRIAL_DIR/attempts" ] || count=$(cat "$NGINX_TRIAL_DIR/attempts")
+    count=$((count+1))
+    echo "$count" > "$NGINX_TRIAL_DIR/attempts"
+    if [ "$count" -lt 3 ]; then echo 'wrong-route'; exit 0; fi
+fi
+if [ "$NGINX_TRIAL_FAILURE" = 'route' ]; then echo 'wrong-route'; else echo 'stash-acme-route-ok'; fi
+''')
+        (bindir / 'sleep').write_text('#!/bin/sh\nexit 0\n')
+        for name in ('nginx', 'systemctl', 'curl', 'sleep'):
+            (bindir / name).chmod(0o755)
+        installer = Path(m.__file__).with_name('install.sh').read_text()
+        fragment = installer.split('STASH_NGINX_FILE=', 1)[1].split('\nif command -v ufw', 1)[0]
+        fragment = 'STASH_NGINX_FILE=' + fragment
+        fragment = fragment.replace('/etc/nginx', str(nginx_dir))
+        # The real branch backs up /etc/nginx; the test backs up its fixture.
+        fragment = fragment.replace('tar -C /etc ', 'tar -C "' + str(self.root) + '" ')
+        env = dict(os.environ, PATH=str(bindir) + ':' + os.environ['PATH'],
+                   STASH_STATE=str(self.state), STASH_TMP=str(self.root), STASH_IP='203.0.113.8',
+                   NGINX_TRIAL_DIR=str(nginx_dir), NGINX_TRIAL_LOG=str(logfile),
+                   NGINX_TRIAL_FAILURE=failure)
+        result = subprocess.run(['bash', '-euo', 'pipefail'], input=fragment,
+                                env=env, text=True, capture_output=True)
+        self.assertEqual(stream.read_bytes(), before)
+        actions = logfile.read_text().splitlines() if logfile.exists() else []
+        self.assertFalse(any('stop ' in a or 'restart ' in a for a in actions), actions)
+        return result, nginx_dir / 'conf.d/stash-acme.conf', actions
+
+    def test_nginx_challenge_addition_preserves_stream_and_only_reloads(self):
+        result, route, actions = self.nginx_route_trial('')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(route.exists())
+        self.assertIn('reload nginx', actions)
+        self.assertNotIn('listen 443', route.read_text())
+        self.assertIn('proxy_pass http://127.0.0.1:9080;', route.read_text())
+
+    def test_bad_nginx_config_is_removed_before_reload(self):
+        result, route, actions = self.nginx_route_trial('config')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(route.exists())
+        self.assertNotIn('reload nginx', actions)
+
+    def test_nginx_probe_retries_until_new_workers_serve_the_route(self):
+        result, route, actions = self.nginx_route_trial('transient')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(route.exists())
+        self.assertEqual((route.parent.parent / 'attempts').read_text().strip(), '3')
+        self.assertEqual(actions.count('reload nginx'), 1)
+
+    def test_failed_nginx_route_check_removes_route_and_reloads_original(self):
+        result, route, actions = self.nginx_route_trial('route')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(route.exists())
+        self.assertEqual(actions.count('reload nginx'), 2)
+
+
+if __name__ == '__main__':
+    unittest.main()
