@@ -6,5 +6,5 @@ STASH_SOURCE="${STASH_SOURCE:-https://raw.githubusercontent.com/waqaarhussain/sp
 STASH_TMP="$(mktemp -d)"
 trap 'rm -rf -- "$STASH_TMP"' EXIT
 curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 "$STASH_SOURCE/proxy-setup.sh" -o "$STASH_TMP/proxy-setup.sh"
-echo 'a7d5104e7eaecad57479a634bc1ceede0d40465faceb286b2d524208cfb87cbd  '"$STASH_TMP/proxy-setup.sh" | sha256sum -c -
+echo 'f07e37d3b1655d02f906ee43aabf16de2335adbbf4d85a75d055712d92e80653  '"$STASH_TMP/proxy-setup.sh" | sha256sum -c -
 STASH_SOURCE="$STASH_SOURCE" bash "$STASH_TMP/proxy-setup.sh" "$@"

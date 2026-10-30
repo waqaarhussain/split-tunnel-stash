@@ -181,6 +181,26 @@ class ManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'stash dns'):
             m.make_config(no_dns, client)
 
+    def test_device_dns_trial_keeps_working_profiles_and_https_transport(self):
+        self.add('Phone')
+        client = m.load('clients.json')['Phone']
+        settings = dict(self.settings, stash_proxy_enabled=True)
+        fixed_before = m.make_config(settings, client)
+        clash_before = m.make_mihomo_config(settings, client)
+        trial = m.make_device_dns_config(settings, client)
+        self.assertEqual(trial['proxies'], fixed_before['proxies'])
+        self.assertEqual(trial['rule-providers'], fixed_before['rule-providers'])
+        for key in ('nameserver', 'default-nameserver', 'proxy-server-nameserver'):
+            self.assertEqual(trial['dns'][key], ['system'])
+        self.assertFalse(trial['dns']['follow-rule'])
+        self.assertNotIn('dns.controld.com', yaml.safe_dump(trial))
+        self.assertNotIn('76.76.2.22', yaml.safe_dump(trial))
+        self.assertEqual(trial['rules'][-1], 'MATCH,DIRECT')
+        self.assertEqual(m.make_config(settings, client), fixed_before)
+        self.assertEqual(m.make_mihomo_config(settings, client), clash_before)
+        with self.assertRaisesRegex(ValueError, 'HTTPS'):
+            m.make_device_dns_config(self.settings, client)
+
     def test_rule_validation_ignores_shared_ip_rules_and_rejects_injection(self):
         rules = m.parse_rules('payload:\n - DOMAIN-SUFFIX,youtube.com\n - IP-CIDR,1.0.0.0/8\n')
         self.assertEqual(rules, ['DOMAIN-SUFFIX,youtube.com'])
@@ -230,15 +250,24 @@ class ManagerTests(unittest.TestCase):
             with urlopen(base + '/s/' + token + '/mihomo.yaml') as response:
                 document = yaml.safe_load(response.read())
                 self.assertFalse(document['proxies'][0]['remote-dns-resolve'])
+            m.save('settings.json', dict(self.settings, stash_proxy_enabled=True))
+            with urlopen(base + '/s/' + token + '/device-dns.yaml') as response:
+                document = yaml.safe_load(response.read())
+                self.assertEqual(document['dns']['nameserver'], ['system'])
+                self.assertEqual(document['proxies'][0]['type'], 'http')
+            m.save('settings.json', self.settings)
             with urlopen(base + '/s/' + token + '/rules.yaml') as response:
                 self.assertIn('DOMAIN-SUFFIX,youtube.com', yaml.safe_load(response.read())['payload'])
-            for path in ('/', '/settings.json', '/s/' + 'A' * 43 + '/config.yaml', '/s/' + token + '/../clients.json'):
+            for path in ('/', '/s/' + 'A' * 43 + '/device-dns.yaml', '/settings.json', '/s/' + 'A' * 43 + '/config.yaml', '/s/' + token + '/../clients.json'):
                 with self.assertRaises(HTTPError) as error:
                     urlopen(base + path)
                 self.assertEqual(error.exception.code, 404)
             with patch('builtins.input', return_value='YES'), patch.object(m, 'run', side_effect=self.fake_run), contextlib.redirect_stdout(io.StringIO()):
                 m.remove_client('TV')
             self.assertNotIn('[Peer]', self.conf.read_text())
+            with self.assertRaises(HTTPError) as error:
+                urlopen(base + '/s/' + token + '/device-dns.yaml')
+            self.assertEqual(error.exception.code, 404)
             with self.assertRaises(HTTPError) as error:
                 urlopen(base + '/s/' + token + '/config.yaml')
             self.assertEqual(error.exception.code, 404)

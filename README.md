@@ -2,7 +2,23 @@
 
 YouTube domain rules through this VPS's authenticated HTTPS proxy, fixed Control D DNS-over-HTTPS, and DIRECT routing for other destinations. Import a private Stash profile URL; the domain rules refresh centrally. The existing Clash WireGuard profile stays available as a fallback.
 
-**Current status:** the earlier Stash WireGuard trial failed despite working main Control D DNS. Packet captures confirmed separate YouTube DNS lookups to 1.0.0.1 and 8.8.4.4 inside WireGuard. This version changes Stash's transport to an HTTP CONNECT proxy over verified TLS. It has passed local integration tests; actual Stash/iPhone/Apple TV playback is still awaiting device validation.
+**Current status:** the earlier Stash WireGuard trial failed despite working main Control D DNS. Packet captures confirmed separate YouTube DNS lookups to 1.0.0.1 and 8.8.4.4 inside WireGuard. This version changes Stash's transport to an HTTP CONNECT proxy over verified TLS. The user reports that YouTube and fixed Control D DNS now work on iPhone with this HTTPS transport. Apple TV acceptance and long-term reliability remain unverified.
+
+## Optional device-DNS experiment
+
+Keep the working fixed-DNS `/config.yaml` profile. A separate `/device-dns.yaml` profile removes the explicit Control D URL and bootstrap IP from the Stash document and requests `system` DNS for all resolver fields. The HTTPS node, authentication, domain catalog and default DIRECT rule are unchanged. This does not guarantee that Stash inherits an installed Apple encrypted DNS profile; the earlier system trial did not preserve it.
+
+On the existing HTTPS installation:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/waqaarhussain/split-tunnel-stash/main/dns-test-update.sh -o /tmp/stash-dns-test-update.sh && bash /tmp/stash-dns-test-update.sh
+```
+
+Run `stash url` and import the optional `/device-dns.yaml` URL as a second profile. Connect only one profile at a time. Verify the intended device resolver with Control D's configuration check and then test YouTube. If it fails either test, select the saved `/config.yaml` profile again; no server rollback or DNS-setting change is required.
+
+**Scope:** this changes Stash's main DNS choice only. The VPS HTTPS proxy still resolves hostnames through the saved Control D DoH endpoint. A domain-forwarding HTTP proxy cannot inherit the phone's DNS settings. If Stash sends an already resolved IP, that connection needs no proxy-side DNS lookup. Do not describe this experiment as all resolution using device DNS or as removing Control D from the server.
+
+The updater validates both working profile documents against the installed manager before replacement, backs up the manager and restarts only the subscription service. It does not change the HTTPS proxy, its certificate, firewall, client keys, passwords or private DNS settings. The new test URL has the same authentication and revocation checks as the other URLs.
 
 ## Existing VPS: enable the HTTPS transport
 

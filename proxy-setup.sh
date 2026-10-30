@@ -43,7 +43,7 @@ for STASH_FILE in manager.py https_proxy.py proxy-firewall; do
     curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 "$STASH_SOURCE/$STASH_FILE" -o "$STASH_TMP/$STASH_FILE"
 done
 # DIGESTS_BEGIN
-echo 'afd40d84293954510694d92c1454c2d7819222a92d1585ed971e2f9900e75586  '"$STASH_TMP/manager.py" | sha256sum -c -
+echo '0b05f81b1dd60e953b472e9974648698f488f34d967054c3c5d466178b6170fc  '"$STASH_TMP/manager.py" | sha256sum -c -
 echo '5c8f5423bff38e42e605081b665280c01eec6a9baa7f7c04c85986655f218980  '"$STASH_TMP/https_proxy.py" | sha256sum -c -
 echo 'dbf1eb55814523858759dfeea5355a1d0c444e3e235b52d392efda3d67791bd5  '"$STASH_TMP/proxy-firewall" | sha256sum -c -
 # DIGESTS_END

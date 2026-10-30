@@ -241,6 +241,8 @@ def show_url(name):
     print('Fixed Control D DNS: ' + ('configured' if settings.get('mihomo_doh') else
                                       'missing; run stash dns before importing'))
     print('\nExisting Clash fallback URL (private):\n' + base + '/mihomo.yaml')
+    if settings.get('stash_proxy_enabled'):
+        print('\nOptional device-DNS experiment (private):\n' + base + '/device-dns.yaml')
     print('Disconnect Clash before connecting Stash with this peer.')
     print('TEST: verify Control D resolver ID, YouTube playback and DIRECT browsing.')
 
@@ -302,6 +304,18 @@ def make_config(settings, client):
     return config
 
 
+def make_device_dns_config(settings, client):
+    """Separate profile experiment; never replace the working fixed-DNS URL."""
+    if not settings.get('stash_proxy_enabled'):
+        raise ValueError('Enable the HTTPS proxy before testing device DNS')
+    config = make_config(settings, client)
+    config['dns'] = {'default-nameserver': ['system'], 'nameserver': ['system'],
+                     'proxy-server-nameserver': ['system'], 'follow-rule': False,
+                     'fake-ip-filter': ['*']}
+    config['rules'].remove('DOMAIN,dns.controld.com,DIRECT')
+    return config
+
+
 def set_dns(value):
     """Store an opt-in Control D DoH URL in private server state."""
     settings = load('settings.json')
@@ -354,7 +368,7 @@ class Gateway(BaseHTTPRequestHandler):
             path = urlsplit(self.path).path
             if path == '/health':
                 return self.respond(200, 'ok\n', 'text/plain')
-            match = re.fullmatch(r'/s/([A-Za-z0-9_-]{43})/(config|rules|mihomo)\.yaml', path)
+            match = re.fullmatch(r'/s/([A-Za-z0-9_-]{43})/(config|rules|mihomo|device-dns)\.yaml', path)
             if not match:
                 return self.respond(404, 'Not found\n', 'text/plain')
             token, kind = match.groups()
@@ -365,7 +379,8 @@ class Gateway(BaseHTTPRequestHandler):
             if kind == 'rules':
                 document = {'payload': current_rules()}
             else:
-                renderer = make_mihomo_config if kind == 'mihomo' else make_config
+                renderer = {'mihomo': make_mihomo_config, 'config': make_config,
+                            'device-dns': make_device_dns_config}[kind]
                 document = renderer(load('settings.json'), client)
             self.respond(200, yaml.safe_dump(document, sort_keys=False), 'application/yaml')
         except Exception:
