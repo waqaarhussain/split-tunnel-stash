@@ -47,7 +47,7 @@ STASH_SOURCE='https://raw.githubusercontent.com/waqaarhussain/split-tunnel-stash
 # or mismatched download after a failed/mid-update fetch.
 curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 "$STASH_SOURCE/manager.py" -o "$STASH_TMP/manager.py"
 curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 "$STASH_SOURCE/firewall" -o "$STASH_TMP/firewall"
-echo '533813f1379d3bbac7ae7c860a7fed62d18771317cf0b4e81cbe0b79fe92250e  '"$STASH_TMP/manager.py" | sha256sum -c -
+echo 'afd40d84293954510694d92c1454c2d7819222a92d1585ed971e2f9900e75586  '"$STASH_TMP/manager.py" | sha256sum -c -
 echo '2222a6647e6f7e919e48865cd706a635dd1ca9d9aa9bf99dea3d992d28b13fe3  '"$STASH_TMP/firewall" | sha256sum -c -
 python3 -m py_compile "$STASH_TMP/manager.py"
 bash -n "$STASH_TMP/firewall"
@@ -361,6 +361,8 @@ if [[ "$STASH_TLS_OK" -ne 1 ]]; then
 fi
 rm -f "$STASH_STATE/.installing"
 echo
-echo 'Installed Stash fixed-DNS trial. First configure DNS: stash dns'
-echo 'Then create a client: new. Import its /config.yaml URL into Stash, Rule mode.'
-echo 'Verify the expected Control D resolver, YouTube playback and DIRECT browsing.'
+echo 'Base installed. Configuring the Stash HTTPS transport...'
+curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 "$STASH_SOURCE/proxy-setup.sh" -o "$STASH_TMP/proxy-setup.sh"
+echo 'a7d5104e7eaecad57479a634bc1ceede0d40465faceb286b2d524208cfb87cbd  '"$STASH_TMP/proxy-setup.sh" | sha256sum -c -
+STASH_SOURCE="$STASH_SOURCE" bash "$STASH_TMP/proxy-setup.sh"
+echo 'Create a device client with new, then import its /config.yaml URL into Stash.'

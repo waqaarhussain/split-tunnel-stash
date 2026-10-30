@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+case "${1:-}" in
+up)
+    iptables -w -C INPUT -p tcp --dport 9443 -m comment --comment stash-https-proxy -j ACCEPT 2>/dev/null ||
+        iptables -w -I INPUT 1 -p tcp --dport 9443 -m comment --comment stash-https-proxy -j ACCEPT
+    ;;
+down)
+    while iptables -w -C INPUT -p tcp --dport 9443 -m comment --comment stash-https-proxy -j ACCEPT 2>/dev/null; do
+        iptables -w -D INPUT -p tcp --dport 9443 -m comment --comment stash-https-proxy -j ACCEPT
+    done
+    ;;
+*) exit 2 ;;
+esac

@@ -294,6 +294,11 @@ def make_config(settings, client):
                      'nameserver': [upstream], 'proxy-server-nameserver': [upstream],
                      'follow-rule': False, 'fake-ip-filter': ['*']}
     config['rules'].insert(0, 'DOMAIN,dns.controld.com,DIRECT')
+    if settings.get('stash_proxy_enabled'):
+        config['proxies'] = [{'name': 'This VPS', 'type': 'http',
+            'server': settings['endpoint'], 'port': settings.get('stash_proxy_port', 9443),
+            'tls': True, 'skip-cert-verify': False, 'username': 'stash',
+            'password': client['token'], 'benchmark-disabled': True}]
     return config
 
 
@@ -380,7 +385,8 @@ class Gateway(BaseHTTPRequestHandler):
 def status():
     clients = load('clients.json')
     metadata = load('rules.json')
-    print('Stash fixed-DNS test: YouTube playback and transport DNS require device validation.')
+    print('Stash transport: ' + ('authenticated HTTPS proxy (TCP 9443)' if load('settings.json').get('stash_proxy_enabled') else 'WireGuard DNS trial'))
+    print('Stash device playback acceptance remains pending.')
     print('Clash DNS: ' + ('explicit Control D DoH' if load('settings.json').get('mihomo_doh') else 'system trial (not encrypted-profile inheritance)'))
     print('Endpoint: ' + load('settings.json')['endpoint'])
     print('Clients: ' + str(len(clients)))
