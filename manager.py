@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stash subscription gateway and root-only client management. Test release."""
+"""Stash subscription gateway and root-only client management."""
 import argparse
 import contextlib
 import datetime as dt
@@ -22,6 +22,7 @@ from urllib.request import Request, urlopen
 import yaml
 
 STATE = Path('/var/lib/stash-split-tunnel')
+EXPORT_ROOT = Path('/home/stash')
 WG_CONF = Path('/etc/wireguard/wg-stash.conf')
 IFACE = 'wg-stash'
 SOURCE = 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/YouTube/YouTube.yaml'
@@ -209,7 +210,7 @@ def apply_clients(settings, clients):
         raise
 
 
-def add_client(name):
+def add_client(name, dns_url=None):
     name = name.strip(' ')
     if (not 1 <= len(name) <= 64 or not name.isprintable()
             or '/' in name or '\\' in name or name in ('.', '..')):
@@ -222,11 +223,16 @@ def add_client(name):
                       if '10.88.0.' + str(i) not in used), None)
     if not available:
         raise ValueError('No free client addresses')
+    dns_url = validate_dns(dns_url or settings.get('mihomo_doh', ''))
     private = run('wg', 'genkey')
     clients[name] = {'private': private,
                      'public': run('wg', 'pubkey', data=private + '\n'),
-                     'ip': available, 'token': secrets.token_urlsafe(32), 'created': now()}
+                     'ip': available, 'token': secrets.token_urlsafe(32), 'created': now(),
+                     'dns_url': dns_url}
+    # Check export paths before changing the live client database.
+    export_directory(name)
     apply_clients(settings, clients)
+    export_client(name, settings, clients[name])
     print('Created: ' + name)
     show_url(name)
 
@@ -236,15 +242,13 @@ def show_url(name):
     if name not in clients:
         raise ValueError('Unknown client')
     base = subscription_base(settings, clients[name])
-    print('Stash TEST subscription URL (private):\n' + base + '/config.yaml')
+    print('Stash subscription URL (private):\n' + base + '/config.yaml')
     print('In Stash: Configuration > Download from URL. Use Rule mode.')
-    print('Fixed Control D DNS: ' + ('configured' if settings.get('mihomo_doh') else
-                                      'missing; run stash dns before importing'))
+    print('Client Control D DNS: configured' if client_dns(settings, clients[name]) else 'Client DNS missing')
+    print('Saved YAML: ' + str(EXPORT_ROOT / name / 'config.yaml'))
     print('\nExisting Clash fallback URL (private):\n' + base + '/mihomo.yaml')
-    if settings.get('stash_proxy_enabled'):
-        print('\nOptional device-DNS experiment (private):\n' + base + '/device-dns.yaml')
     print('Disconnect Clash before connecting Stash with this peer.')
-    print('TEST: verify Control D resolver ID, YouTube playback and DIRECT browsing.')
+    print('Verify Control D resolver ID, YouTube playback and DIRECT browsing.')
 
 
 def remove_client(name):
@@ -253,8 +257,13 @@ def remove_client(name):
         raise ValueError('Unknown client')
     if input('Remove ' + name + ' and revoke its URL? Type YES: ') != 'YES':
         raise ValueError('Cancelled')
+    directory = export_directory(name, create=False)
     del clients[name]
     apply_clients(load('settings.json'), clients)
+    if directory.exists():
+        (directory / 'config.yaml').unlink(missing_ok=True)
+        if not any(directory.iterdir()):
+            directory.rmdir()
     print('Removed peer and revoked subscription URL: ' + name)
 
 
@@ -287,8 +296,8 @@ def make_base_config(settings, client):
 
 
 def make_config(settings, client):
-    """Stash trial: explicit Control D DoH, with transport DNS guards retained."""
-    upstream = settings.get('mihomo_doh')
+    """Working Stash HTTPS profile with this client's explicit Control D DoH."""
+    upstream = client_dns(settings, client)
     if not upstream:
         raise ValueError('Set explicit Control D DNS first with stash dns')
     config = make_base_config(settings, client)
@@ -316,6 +325,59 @@ def make_device_dns_config(settings, client):
     return config
 
 
+def validate_dns(value):
+    if not re.fullmatch(r'https://dns\.controld\.com/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)?', value):
+        raise ValueError("Use this device's https://dns.controld.com/ resolver URL")
+    return value
+
+
+def client_dns(settings, client):
+    return validate_dns(client.get('dns_url', settings.get('mihomo_doh', '')))
+
+
+def export_directory(name, create=True):
+    if (not 1 <= len(name) <= 64 or not name.isprintable()
+            or '/' in name or '\\' in name or name in ('.', '..')):
+        raise ValueError('Invalid client folder name')
+    directory = EXPORT_ROOT / name
+    for path in (EXPORT_ROOT, directory):
+        if path.is_symlink():
+            raise ValueError('Refusing a symlink in the client export path')
+        if not path.exists():
+            if not create:
+                return directory
+            path.mkdir(mode=0o700)
+        if not path.is_dir() or path.stat().st_uid != os.geteuid():
+            raise ValueError('Client export directories must be owned by the administrator')
+        path.chmod(0o700)
+    return directory
+
+
+def export_client(name, settings, client):
+    directory = export_directory(name)
+    atomic(directory / 'config.yaml', yaml.safe_dump(make_config(settings, client), sort_keys=False), mode=0o600)
+
+
+def export_clients():
+    """Pin legacy clients to their working resolver, then export private YAML copies."""
+    settings, clients = load('settings.json'), load('clients.json')
+    for name, client in clients.items():
+        client['dns_url'] = client_dns(settings, client)
+        export_client(name, settings, client)
+    save('clients.json', clients)
+    print('Client YAML files saved under ' + str(EXPORT_ROOT))
+
+
+def set_client_dns(name, value):
+    settings, clients = load('settings.json'), load('clients.json')
+    if name not in clients:
+        raise ValueError('Unknown client')
+    clients[name]['dns_url'] = validate_dns(value)
+    export_client(name, settings, clients[name])
+    save('clients.json', clients)
+    print('Client DNS updated. Refresh its full Stash profile and reconnect.')
+
+
 def set_dns(value):
     """Store an opt-in Control D DoH URL in private server state."""
     settings = load('settings.json')
@@ -326,7 +388,7 @@ def set_dns(value):
     else:
         raise ValueError('Use your https://dns.controld.com/ resolver URL or system')
     save('settings.json', settings)
-    print('Fixed Control D DNS updated. Refresh the full profile and reconnect.')
+    print('Legacy/default DNS updated. Existing per-client Stash DNS is unchanged; use stash client-dns.')
 
 
 def make_mihomo_config(settings, client):
@@ -401,14 +463,16 @@ def status():
     clients = load('clients.json')
     metadata = load('rules.json')
     print('Stash transport: ' + ('authenticated HTTPS proxy (TCP 9443)' if load('settings.json').get('stash_proxy_enabled') else 'WireGuard DNS trial'))
-    print('Stash device playback acceptance remains pending.')
+    print('iPhone HTTPS playback verified by user; Apple TV acceptance pending.')
+    print('Stash DNS: per-client Control D DoH; private YAML under ' + str(EXPORT_ROOT))
+    print('Idle cleanup: client VPS DNS cache after 5 minutes without active proxy connections.')
     print('Clash DNS: ' + ('explicit Control D DoH' if load('settings.json').get('mihomo_doh') else 'system trial (not encrypted-profile inheritance)'))
     print('Endpoint: ' + load('settings.json')['endpoint'])
     print('Clients: ' + str(len(clients)))
     print('Domain rules: ' + str(len(current_rules())))
     print('Last successful rule refresh: ' + metadata['updated'])
     print('Refresh schedule: every hour at :00 and :30; Client rule fetch interval: 1800 seconds.')
-    for unit in ('wg-quick@wg-stash', 'stash-subscriptions', 'stash-https', 'stash-rules.timer'):
+    for unit in ('wg-quick@wg-stash', 'stash-subscriptions', 'stash-https', 'stash-proxy', 'stash-rules.timer'):
         result = subprocess.run(['systemctl', 'is-active', unit], text=True, capture_output=True)
         print(unit + ': ' + result.stdout.strip())
     try:
@@ -440,7 +504,7 @@ def choose_client():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['init', 'new', 'remove', 'url', 'list', 'rules', 'service', 'dns', 'status', 'serve'])
+    parser.add_argument('command', choices=['init', 'new', 'remove', 'url', 'list', 'rules', 'service', 'dns', 'client-dns', 'export', 'status', 'serve'])
     parser.add_argument('value', nargs='?')
     args = parser.parse_args()
     if args.command == 'serve':
@@ -451,7 +515,8 @@ def main():
         if args.command == 'init':
             initialize(args.value)
         elif args.command == 'new':
-            add_client(args.value or input('Client name: ').strip())
+            name = args.value or input('Client name: ').strip()
+            add_client(name, validate_dns(input('This device Control D DoH URL: ').strip()))
         elif args.command == 'remove':
             remove_client(args.value or choose_client())
         elif args.command == 'url':
@@ -462,6 +527,10 @@ def main():
             refresh()
         elif args.command == 'dns':
             set_dns(args.value or input('Control D DoH URL (or system): ').strip())
+        elif args.command == 'client-dns':
+            set_client_dns(args.value or choose_client(), input('This device Control D DoH URL: ').strip())
+        elif args.command == 'export':
+            export_clients()
         elif args.command == 'service':
             select_service(args.value)
         elif args.command == 'status':

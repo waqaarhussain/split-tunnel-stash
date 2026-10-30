@@ -9,7 +9,7 @@ import ssl
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 import dns.message
 import dns.rrset
@@ -108,6 +108,72 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         writer.close(); await writer.wait_closed()
         return response
 
+    async def test_quiet_uplink_does_not_timeout_an_active_video_stream(self):
+        uplink, downlink = asyncio.StreamReader(), asyncio.StreamReader()
+        class Sink:
+            def __init__(self): self.data = b''
+            def write(self,data): self.data += data
+            async def drain(self): pass
+        upload_sink, download_sink = Sink(), Sink()
+        with patch.object(p, 'IDLE_SECONDS', 0.15):
+            activity = [p.time.monotonic()]
+            tasks = [asyncio.create_task(self.relay.copy(uplink,upload_sink,activity)),
+                     asyncio.create_task(self.relay.copy(downlink,download_sink,activity)),
+                     asyncio.create_task(self.relay.connection_idle(activity))]
+            try:
+                for _ in range(7):
+                    downlink.feed_data(b'video')
+                    await asyncio.sleep(0.04)
+                    self.assertFalse(any(t.done() for t in tasks))
+                self.assertEqual(download_sink.data,b'video'*7)
+                self.assertEqual(upload_sink.data,b'')
+                await asyncio.wait_for(tasks[2],0.5)
+            finally:
+                for task in tasks: task.cancel()
+                await asyncio.gather(*tasks,return_exceptions=True)
+
+    async def test_device_resolver_and_cache_isolation(self):
+        token2 = 'B' * 43
+        clients = {'Phone': {'token': self.token, 'dns_url': 'https://dns.controld.com/PHONE_TEST'},
+                   'TV': {'token': token2, 'dns_url': 'https://dns.controld.com/TV_TEST'}}
+        (self.state / 'clients.json').write_text(json.dumps(clients))
+        with patch.object(p, 'doh_lookup', return_value=(['8.8.8.8'], 60)) as lookup:
+            await self.relay.resolve('video.example', self.settings, self.token)
+            await self.relay.resolve('video.example', self.settings, token2)
+            await self.relay.resolve('video.example', self.settings, self.token)
+        self.assertEqual(lookup.call_count, 2)
+        self.assertEqual([c.args[1] for c in lookup.call_args_list],
+                         ['https://dns.controld.com/PHONE_TEST', 'https://dns.controld.com/TV_TEST'])
+        keys = list(self.relay.cache)
+        # Hold entries beyond the idle boundary to distinguish client cleanup from TTL expiry.
+        for key in keys: self.relay.cache[key] = (1000, ['8.8.8.8'])
+        self.relay.idle_since = {self.token: 0, token2: 0}
+        self.relay.per_client = {token2: 1}
+        self.relay.cleanup(now=299)
+        self.assertEqual(len(self.relay.cache), 2)
+        self.relay.cleanup(now=300)
+        self.assertEqual({key[0] for key in self.relay.cache}, {token2})
+        self.assertEqual(self.relay.per_client, {token2: 1})
+        # Revocation also prevents a cached result being reused.
+        (self.state / 'clients.json').write_text('{}')
+        with self.assertRaises(ValueError):
+            await self.relay.resolve('video.example', self.settings, token2)
+
+    async def test_active_downstream_keeps_connection_alive_and_idle_expires(self):
+        activity = [0]
+        clock = [0]
+        sleeps = []
+        async def advance(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+            # Incoming video data in either direction refreshes the shared clock.
+            if len(sleeps) == 1: activity[0] = clock[0] - 1
+        with patch.object(p.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(p.asyncio, 'sleep', side_effect=advance):
+            await self.relay.connection_idle(activity)
+        self.assertEqual(sleeps, [300, 299])
+        self.assertEqual(clock[0], 599)
+
     async def test_authentication_port_limits_and_revocation(self):
         response = await self.request('CONNECT target.test:443 HTTP/1.1\r\n\r\n')
         self.assertIn(b'407', response)
@@ -137,6 +203,8 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
                 with contextlib.suppress(Exception): await writer.wait_closed()
         upstream = await asyncio.start_server(target, '127.0.0.1', 0, ssl=self.context)
         upstream_port = upstream.sockets[0].getsockname()[1]
+        (self.state / 'clients.json').write_text(json.dumps({'Phone': {
+            'token': self.token, 'dns_url': 'https://dns.controld.com/PHONE_TEST'}}))
         original_open = asyncio.open_connection
         async def mapped_open(host, port, **kwargs):
             self.assertEqual((host, port), ('8.8.8.8', 443))
@@ -152,7 +220,7 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
                 stdout, stderr = await process.communicate()
                 self.assertEqual(process.returncode, 0, stderr.decode())
                 self.assertEqual(stdout, b'hello')
-                lookup.assert_called_once_with('target.test', self.settings['mihomo_doh'], self.settings['endpoint'])
+                lookup.assert_called_once_with('target.test', 'https://dns.controld.com/PHONE_TEST', self.settings['endpoint'])
         finally:
             upstream.close(); await upstream.wait_closed()
 

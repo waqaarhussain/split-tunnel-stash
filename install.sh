@@ -47,7 +47,7 @@ STASH_SOURCE='https://raw.githubusercontent.com/waqaarhussain/split-tunnel-stash
 # or mismatched download after a failed/mid-update fetch.
 curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 "$STASH_SOURCE/manager.py" -o "$STASH_TMP/manager.py"
 curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 "$STASH_SOURCE/firewall" -o "$STASH_TMP/firewall"
-echo '0b05f81b1dd60e953b472e9974648698f488f34d967054c3c5d466178b6170fc  '"$STASH_TMP/manager.py" | sha256sum -c -
+echo '04ab0b920d2b5200268ef97b201739b361299f18d9b46564f4f3f628a12afbd6  '"$STASH_TMP/manager.py" | sha256sum -c -
 echo '2222a6647e6f7e919e48865cd706a635dd1ca9d9aa9bf99dea3d992d28b13fe3  '"$STASH_TMP/firewall" | sha256sum -c -
 python3 -m py_compile "$STASH_TMP/manager.py"
 bash -n "$STASH_TMP/firewall"
@@ -363,6 +363,6 @@ rm -f "$STASH_STATE/.installing"
 echo
 echo 'Base installed. Configuring the Stash HTTPS transport...'
 curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 "$STASH_SOURCE/proxy-setup.sh" -o "$STASH_TMP/proxy-setup.sh"
-echo 'f07e37d3b1655d02f906ee43aabf16de2335adbbf4d85a75d055712d92e80653  '"$STASH_TMP/proxy-setup.sh" | sha256sum -c -
+echo '25071b7a9f0bc3d84bddc767e93c6bf3c02b0ce3f9a08f67e7a74fb61623b6bb  '"$STASH_TMP/proxy-setup.sh" | sha256sum -c -
 STASH_SOURCE="$STASH_SOURCE" bash "$STASH_TMP/proxy-setup.sh"
 echo 'Create a device client with new, then import its /config.yaml URL into Stash.'

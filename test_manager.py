@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shlex
 import subprocess
 import tempfile
 import threading
@@ -27,6 +28,7 @@ class ManagerTests(unittest.TestCase):
         self.state.mkdir()
         self.conf = self.root / 'wg-stash.conf'
         self.patches = [patch.object(m, 'STATE', self.state), patch.object(m, 'WG_CONF', self.conf),
+                        patch.object(m, 'EXPORT_ROOT', self.root / 'exports'),
                         patch.object(m.grp, 'getgrnam', return_value=types.SimpleNamespace(gr_gid=os.getgid()))]
         for item in self.patches:
             item.start()
@@ -60,6 +62,113 @@ class ManagerTests(unittest.TestCase):
     def add(self, name):
         with patch.object(m, 'run', side_effect=self.fake_run), contextlib.redirect_stdout(io.StringIO()):
             m.add_client(name)
+
+    def test_proxy_update_failure_restores_immediately_previous_runtime(self):
+        setup = Path(__file__).with_name('proxy-setup.sh').read_text()
+        start = setup.index('proxy_setup_error() {')
+        end = setup.index('\ntrap proxy_setup_error ERR', start)
+        handler = setup[start:end]
+        work = self.root / 'update'
+        previous = work / 'previous'
+        lib = work / 'lib'
+        previous.mkdir(parents=True); lib.mkdir()
+        unit = work / 'stash-proxy.service'
+        for name in ('manager.py', 'https_proxy.py', 'proxy-firewall', 'stash-proxy.service',
+                     'settings.json', 'clients.json'):
+            (previous / name).write_text('previous-' + name)
+            target = self.state / name if name.endswith('.json') else unit if name.endswith('.service') else lib / name
+            target.write_text('broken-update')
+        handler = handler.replace('/etc/systemd/system/stash-proxy.service', shlex.quote(str(unit)))
+        script = '\n'.join([
+            'set -euo pipefail',
+            'STASH_TMP=' + shlex.quote(str(work)),
+            'STASH_LIB=' + shlex.quote(str(lib)),
+            'STASH_STATE=' + shlex.quote(str(self.state)),
+            'STASH_WAS_ACTIVE=1', 'STASH_WAS_ENABLED=1',
+            'systemctl() { echo "$*" >> ' + shlex.quote(str(work / 'calls')) + '; }',
+            handler, 'proxy_setup_error'])
+        result = subprocess.run(['bash','-c',script],text=True,capture_output=True)
+        self.assertEqual(result.returncode,1)
+        for name in ('manager.py','https_proxy.py','proxy-firewall'):
+            self.assertEqual((lib / name).read_text(),'previous-' + name)
+        for name in ('settings.json','clients.json'):
+            self.assertEqual((self.state / name).read_text(),'previous-' + name)
+        self.assertEqual(unit.read_text(),'previous-stash-proxy.service')
+        calls = (work / 'calls').read_text()
+        self.assertIn('start stash-proxy.service',calls)
+        self.assertIn('restart stash-subscriptions',calls)
+        self.assertNotIn('wg-quick',calls)
+        self.assertNotIn('nginx',calls)
+
+    def test_new_helper_flow_prompts_for_device_dns_and_serves_matching_yaml(self):
+        m.save('settings.json', dict(self.settings, stash_proxy_enabled=True))
+        with patch.object(m.sys, 'argv', ['manager.py', 'new']), \
+             patch('builtins.input', side_effect=['My TV', 'https://dns.controld.com/TV_ONLY_TEST']) as prompts, \
+             patch.object(m, 'run', side_effect=self.fake_run), contextlib.redirect_stdout(io.StringIO()):
+            m.main()
+        self.assertEqual(prompts.call_count, 2)
+        client = m.load('clients.json')['My TV']
+        self.assertEqual(client['dns_url'], 'https://dns.controld.com/TV_ONLY_TEST')
+        server = m.ThreadingHTTPServer(('127.0.0.1', 0), m.Gateway)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            url = 'http://127.0.0.1:' + str(server.server_port) + '/s/' + client['token'] + '/config.yaml'
+            with urlopen(url) as response:
+                self.assertEqual(response.read(), (m.EXPORT_ROOT / 'My TV' / 'config.yaml').read_bytes())
+        finally:
+            server.shutdown(); server.server_close(); worker.join()
+        # Blank input must not silently assign the default device resolver.
+        with patch.object(m.sys,'argv',['manager.py','new']), \
+             patch('builtins.input',side_effect=['Other TV','']), self.assertRaises(ValueError):
+            m.main()
+        self.assertNotIn('Other TV',m.load('clients.json'))
+
+    def test_per_client_resolvers_exports_and_legacy_migration(self):
+        self.settings['stash_proxy_enabled'] = True
+        m.save('settings.json', self.settings)
+        self.add('Phone')
+        self.add('TV')
+        clients = m.load('clients.json')
+        clash_before = m.make_mihomo_config(self.settings, clients['Phone'])
+        with contextlib.redirect_stdout(io.StringIO()):
+            m.set_client_dns('Phone', 'https://dns.controld.com/PHONE_TEST')
+        clients = m.load('clients.json')
+        for name, url in [('Phone', 'https://dns.controld.com/PHONE_TEST'),
+                          ('TV', self.settings['mihomo_doh'])]:
+            path = m.EXPORT_ROOT / name / 'config.yaml'
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+            exported = yaml.safe_load(path.read_text())
+            self.assertEqual(exported, m.make_config(self.settings, clients[name]))
+            self.assertEqual(exported['dns']['nameserver'], [url])
+        self.assertEqual(m.make_mihomo_config(self.settings, clients['Phone']), clash_before)
+        # Existing clients inherit their original working resolver once, without new keys/URLs.
+        del clients['TV']['dns_url']
+        m.save('clients.json', clients)
+        before = copy.deepcopy(clients['TV'])
+        with contextlib.redirect_stdout(io.StringIO()): m.export_clients()
+        migrated = m.load('clients.json')['TV']
+        self.assertEqual(migrated.pop('dns_url'), self.settings['mihomo_doh'])
+        self.assertEqual(migrated, before)
+        # Later global changes cannot silently change either migrated client.
+        with contextlib.redirect_stdout(io.StringIO()): m.set_dns('https://dns.controld.com/OTHER_TEST')
+        self.assertEqual(m.client_dns(m.load('settings.json'), m.load('clients.json')['TV']),
+                         self.settings['mihomo_doh'])
+
+    def test_export_rejects_symlink_and_remove_deletes_private_yaml(self):
+        m.EXPORT_ROOT.mkdir()
+        target = self.root / 'victim'
+        target.mkdir()
+        (m.EXPORT_ROOT / 'Phone').symlink_to(target, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'symlink'): self.add('Phone')
+        self.assertEqual(m.load('clients.json'), {})
+        (m.EXPORT_ROOT / 'Phone').unlink()
+        self.add('Phone')
+        with patch('builtins.input', return_value='YES'), patch.object(m,'run',side_effect=self.fake_run), contextlib.redirect_stdout(io.StringIO()):
+            m.remove_client('Phone')
+        self.assertFalse((m.EXPORT_ROOT / 'Phone').exists())
+        self.assertEqual(m.load('clients.json'), {})
 
     def test_distinct_keys_addresses_and_tokens(self):
         self.add('AppleTV')
@@ -178,8 +287,9 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(config['rules'][-1], 'MATCH,DIRECT')
         self.assertEqual(yaml.safe_load(yaml.safe_dump(config)), config)
         no_dns = {k: v for k, v in self.settings.items() if k != 'mihomo_doh'}
-        with self.assertRaisesRegex(ValueError, 'stash dns'):
-            m.make_config(no_dns, client)
+        self.assertEqual(m.make_config(no_dns, client), config)
+        with self.assertRaisesRegex(ValueError, 'resolver URL'):
+            m.make_config(no_dns, {k:v for k,v in client.items() if k != 'dns_url'})
 
     def test_device_dns_trial_keeps_working_profiles_and_https_transport(self):
         self.add('Phone')

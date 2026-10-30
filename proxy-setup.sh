@@ -43,8 +43,8 @@ for STASH_FILE in manager.py https_proxy.py proxy-firewall; do
     curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 "$STASH_SOURCE/$STASH_FILE" -o "$STASH_TMP/$STASH_FILE"
 done
 # DIGESTS_BEGIN
-echo '0b05f81b1dd60e953b472e9974648698f488f34d967054c3c5d466178b6170fc  '"$STASH_TMP/manager.py" | sha256sum -c -
-echo '5c8f5423bff38e42e605081b665280c01eec6a9baa7f7c04c85986655f218980  '"$STASH_TMP/https_proxy.py" | sha256sum -c -
+echo '04ab0b920d2b5200268ef97b201739b361299f18d9b46564f4f3f628a12afbd6  '"$STASH_TMP/manager.py" | sha256sum -c -
+echo '63199a453a54d206082ccea79ee19ed66c1baf2d3ce73d8247746b55db2619d9  '"$STASH_TMP/https_proxy.py" | sha256sum -c -
 echo 'dbf1eb55814523858759dfeea5355a1d0c444e3e235b52d392efda3d67791bd5  '"$STASH_TMP/proxy-firewall" | sha256sum -c -
 # DIGESTS_END
 python3 -m py_compile "$STASH_TMP/manager.py" "$STASH_TMP/https_proxy.py"
@@ -54,9 +54,10 @@ if ! python3 -c 'import dns.message' 2>/dev/null; then
     apt-get update
     apt-get install -y python3-dnspython
 fi
-if ! python3 - "$STASH_STATE/settings.json" <<'PY'
+if ! python3 - "$STASH_STATE/settings.json" "$STASH_STATE/clients.json" <<'PY'
 import json,sys
-sys.exit(0 if json.load(open(sys.argv[1])).get('mihomo_doh') else 1)
+settings,clients=json.load(open(sys.argv[1])),json.load(open(sys.argv[2]))
+sys.exit(0 if settings.get('mihomo_doh') or all(c.get('dns_url') for c in clients.values()) else 1)
 PY
 then
     python3 "$STASH_TMP/manager.py" dns
@@ -69,19 +70,58 @@ def module(name,path):
 old,new,proxy=[module('module'+str(i),path) for i,path in enumerate(sys.argv[1:])]
 settings,clients=new.load('settings.json'),new.load('clients.json')
 proxy.certificate_files(settings['endpoint'])
-# Real DNS request over verified TLS before changing the running services.
-proxy.doh_lookup('www.youtube.com',settings.get('mihomo_doh',''),settings['endpoint'])
-for client in clients.values():
+# Real DNS requests for each distinct device resolver, with verified TLS.
+upstreams={new.client_dns(settings,c) for c in clients.values()}
+if not upstreams and settings.get('mihomo_doh'):
+    upstreams={new.validate_dns(settings['mihomo_doh'])}
+for upstream in upstreams:
+    proxy.doh_lookup('www.youtube.com',upstream,settings['endpoint'])
+for name,client in clients.items():
+    new.export_directory(name,create=False)
+    new.make_config(dict(settings,stash_proxy_enabled=True,stash_proxy_port=9443),client)
+    if settings.get('stash_proxy_enabled') and old.make_config(settings,client) != new.make_config(settings,client):
+        raise SystemExit('Working Stash output changed. Setup aborted.')
     if old.make_mihomo_config(settings,client) != new.make_mihomo_config(settings,client):
         raise SystemExit('Clash output changed. Setup aborted.')
-print('Control D DoH answered. Trusted certificate found. Clash output unchanged.')
+print('Configured DNS resolvers checked. Trusted certificate found. Existing profiles unchanged.')
 PY
 [[ -e "$STASH_BACKUP" ]] || install -m 600 "$STASH_LIB/manager.py" "$STASH_BACKUP"
-# Any subsequent setup failure restores the saved pre-proxy manager.
+# Error rollback restores the immediately previous working installation.
+# Explicit `rollback` above remains the original return-to-Clash option.
+mkdir "$STASH_TMP/previous"
+for STASH_FILE in manager.py https_proxy.py proxy-firewall; do
+    [[ ! -f "$STASH_LIB/$STASH_FILE" ]] || cp -a "$STASH_LIB/$STASH_FILE" "$STASH_TMP/previous/$STASH_FILE"
+done
+cp -a "$STASH_STATE/settings.json" "$STASH_TMP/previous/settings.json"
+cp -a "$STASH_STATE/clients.json" "$STASH_TMP/previous/clients.json"
+[[ ! -f /etc/systemd/system/stash-proxy.service ]] || cp -a /etc/systemd/system/stash-proxy.service "$STASH_TMP/previous/stash-proxy.service"
+STASH_WAS_ACTIVE=0
+systemctl is-active --quiet stash-proxy.service && STASH_WAS_ACTIVE=1
+STASH_WAS_ENABLED=0
+systemctl is-enabled --quiet stash-proxy.service && STASH_WAS_ENABLED=1
 proxy_setup_error() {
     trap - ERR
-    echo 'HTTPS proxy setup failed. Restoring the pre-proxy manager.' >&2
-    rollback_proxy || true
+    echo 'Stash update failed. Restoring the immediately previous installation.' >&2
+    systemctl stop stash-proxy.service || true
+    for STASH_FILE in manager.py https_proxy.py proxy-firewall; do
+        if [[ -f "$STASH_TMP/previous/$STASH_FILE" ]]; then
+            cp -a "$STASH_TMP/previous/$STASH_FILE" "$STASH_LIB/$STASH_FILE"
+        else
+            rm -f -- "$STASH_LIB/$STASH_FILE"
+        fi
+    done
+    cp -a "$STASH_TMP/previous/settings.json" "$STASH_STATE/settings.json"
+    cp -a "$STASH_TMP/previous/clients.json" "$STASH_STATE/clients.json"
+    if [[ -f "$STASH_TMP/previous/stash-proxy.service" ]]; then
+        cp -a "$STASH_TMP/previous/stash-proxy.service" /etc/systemd/system/stash-proxy.service
+    else
+        systemctl disable stash-proxy.service || true
+        rm -f /etc/systemd/system/stash-proxy.service
+    fi
+    systemctl daemon-reload
+    if [[ $STASH_WAS_ENABLED -eq 0 ]]; then systemctl disable stash-proxy.service || true; fi
+    if [[ $STASH_WAS_ACTIVE -eq 1 ]]; then systemctl start stash-proxy.service || true; fi
+    systemctl restart stash-subscriptions || true
     exit 1
 }
 trap proxy_setup_error ERR
@@ -144,11 +184,19 @@ with m.locked():
     settings=m.load('settings.json');settings.update(stash_proxy_enabled=True,stash_proxy_port=9443)
     for client in m.load('clients.json').values(): m.make_config(settings,client)
     m.save('settings.json',settings)
+    m.export_clients()
 PY
+cat > /usr/local/bin/new <<'HELPER'
+#!/bin/bash
+exec /usr/local/bin/stash new "$@"
+HELPER
+chmod 755 /usr/local/bin/new
 systemctl restart stash-subscriptions
 curl --noproxy '*' -fsS --retry 5 --retry-connrefused --retry-delay 1 --max-time 3 http://127.0.0.1:8765/health >/dev/null
 trap - ERR
 echo 'Stash HTTPS transport ready. Allow inbound TCP 9443 in any provider firewall.'
-echo 'Run stash url. Reimport its /config.yaml URL into Stash; disconnect Clash first.'
+echo 'Run new for a client name and its Control D DNS URL. YAML: /home/stash/<client>/config.yaml'
+echo 'Existing clients keep their resolver and private /config.yaml URL. Run stash url to show it.'
+echo 'Per-client VPS DNS cache clears after 5 idle minutes; no service-wide idle restarts.'
 echo 'Check Control D resolver ID, YouTube playback and DIRECT browsing.'
 echo 'Rollback: bash /tmp/stash-proxy-setup.sh rollback'

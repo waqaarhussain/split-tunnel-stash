@@ -11,7 +11,7 @@ STASH_TMP="$(mktemp -d)"
 trap 'rm -rf -- "$STASH_TMP"' EXIT
 STASH_SOURCE="${STASH_SOURCE:-https://raw.githubusercontent.com/waqaarhussain/split-tunnel-stash/main}"
 curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 "$STASH_SOURCE/manager.py" -o "$STASH_TMP/manager.py"
-echo '0b05f81b1dd60e953b472e9974648698f488f34d967054c3c5d466178b6170fc  '"$STASH_TMP/manager.py" | sha256sum -c -
+echo '04ab0b920d2b5200268ef97b201739b361299f18d9b46564f4f3f628a12afbd6  '"$STASH_TMP/manager.py" | sha256sum -c -
 python3 -m py_compile "$STASH_TMP/manager.py"
 python3 - "$STASH_MANAGER" "$STASH_TMP/manager.py" <<'PY'
 import importlib.util,sys

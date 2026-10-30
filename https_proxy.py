@@ -23,6 +23,8 @@ STATE = Path('/var/lib/stash-split-tunnel')
 CERT_ROOT = Path('/var/lib/stash-https/data/caddy/certificates')
 MAX_CONNECTIONS = 128
 MAX_PER_CLIENT = 16
+IDLE_SECONDS = 300
+MAINTENANCE_SECONDS = 10
 
 
 def load(name):
@@ -113,8 +115,9 @@ class Relay:
         self.active = 0
         self.per_client = {}
         self.cache = {}
+        self.idle_since = {}
 
-    async def resolve(self, host, settings):
+    async def resolve(self, host, settings, token):
         endpoint = settings['endpoint']
         try:
             return [public_address(host, endpoint)]
@@ -129,14 +132,18 @@ class Relay:
         host = host.rstrip('.').lower()
         if len(host) > 253 or not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?', host):
             raise ValueError('Invalid hostname')
-        upstream = settings.get('mihomo_doh', '')
-        key = (upstream, host, endpoint)
+        client = next((c for c in load('clients.json').values()
+                       if hmac.compare_digest(c['token'], token)), None)
+        if client is None:
+            raise ValueError('Client revoked')
+        upstream = client.get('dns_url', settings.get('mihomo_doh', ''))
+        key = (token, upstream, host, endpoint)
         cached = self.cache.get(key)
         if cached and cached[0] > time.monotonic():
             return cached[1]
         addresses, ttl = await asyncio.to_thread(doh_lookup, host, upstream, endpoint)
         if len(self.cache) >= 2048:
-            self.cache.clear()
+            del self.cache[min(self.cache, key=lambda item: self.cache[item][0])]
         self.cache[key] = (time.monotonic() + max(0, ttl), addresses)
         return addresses
 
@@ -149,13 +156,38 @@ class Relay:
                       % (code, phrases[code], auth)).encode('ascii'))
         await writer.drain()
 
-    async def copy(self, reader, writer):
+    def cleanup(self, now=None):
+        now = time.monotonic() if now is None else now
+        idle = {token for token, since in self.idle_since.items()
+                if not self.per_client.get(token) and now - since >= IDLE_SECONDS}
+        for key in list(self.cache):
+            if key[0] in idle or self.cache[key][0] <= now:
+                del self.cache[key]
+        for token in idle:
+            del self.idle_since[token]
+
+    async def maintenance(self):
         while True:
-            chunk = await asyncio.wait_for(reader.read(65536), 120)
+            await asyncio.sleep(MAINTENANCE_SECONDS)
+            self.cleanup()
+
+    async def copy(self, reader, writer, activity):
+        while True:
+            chunk = await reader.read(65536)
             if not chunk:
                 return
+            activity[0] = time.monotonic()
             writer.write(chunk)
-            await asyncio.wait_for(writer.drain(), 120)
+            await asyncio.wait_for(writer.drain(), IDLE_SECONDS)
+            activity[0] = time.monotonic()
+
+    async def connection_idle(self, activity):
+        # Both directions share one clock: long downstream videos stay alive.
+        while True:
+            remaining = IDLE_SECONDS - (time.monotonic() - activity[0])
+            if remaining <= 0:
+                return
+            await asyncio.sleep(remaining)
 
     async def revoked(self, token):
         while True:
@@ -211,9 +243,10 @@ class Relay:
                 return
             self.per_client[token] = self.per_client.get(token, 0) + 1
             token_counted = True
+            self.idle_since.pop(token, None)
             settings = load('settings.json')
             try:
-                addresses = await self.resolve(host, settings)
+                addresses = await self.resolve(host, settings, token)
             except ValueError:
                 await self.reply(writer, 403)
                 return
@@ -230,8 +263,10 @@ class Relay:
             writer.write(b'HTTP/1.1 200 Connection Established\r\n\r\n')
             await writer.drain()
             connected = True
-            tasks = [asyncio.create_task(self.copy(reader, upstream_writer)),
-                     asyncio.create_task(self.copy(upstream_reader, writer)),
+            activity = [time.monotonic()]
+            tasks = [asyncio.create_task(self.copy(reader, upstream_writer, activity)),
+                     asyncio.create_task(self.copy(upstream_reader, writer, activity)),
+                     asyncio.create_task(self.connection_idle(activity)),
                      asyncio.create_task(self.revoked(token))]
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         except (OSError, ValueError, asyncio.TimeoutError, asyncio.IncompleteReadError,
@@ -248,6 +283,7 @@ class Relay:
                 self.per_client[token] -= 1
                 if not self.per_client[token]:
                     del self.per_client[token]
+                    self.idle_since[token] = time.monotonic()
             if counted:
                 self.active -= 1
             for stream in (upstream_writer, writer):
@@ -282,11 +318,14 @@ async def main():
             except (OSError, ssl.SSLError):
                 print('Certificate reload failed; retaining current TLS context.', flush=True)
     renewal = asyncio.create_task(renew())
+    maintenance = asyncio.create_task(relay.maintenance())
     try:
         async with server:
             await server.serve_forever()
     finally:
         renewal.cancel()
+        maintenance.cancel()
+        await asyncio.gather(renewal, maintenance, return_exceptions=True)
 
 
 if __name__ == '__main__':
