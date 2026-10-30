@@ -27,7 +27,7 @@ if [[ ! -e "$STASH_STATE/.installing" ]]; then
 fi
 install -d -m 750 "$STASH_STATE"
 touch "$STASH_STATE/.installing"
-echo 'Split Tunnel Clash: per-VPS WireGuard exit with domain rules.'
+echo 'Split Tunnel Stash: fixed Control D DNS trial.'
 echo 'Configure explicit Control D DoH with stash dns after installation.'
 echo 'Uses TCP 8443 for private profile URLs and UDP 51821 for its separate tunnel.'
 echo 'TCP 80 is used only for certificate validation. Existing TCP 443 and wg0 are preserved.'
@@ -47,7 +47,7 @@ STASH_SOURCE='https://raw.githubusercontent.com/waqaarhussain/split-tunnel-stash
 # or mismatched download after a failed/mid-update fetch.
 curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 "$STASH_SOURCE/manager.py" -o "$STASH_TMP/manager.py"
 curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 "$STASH_SOURCE/firewall" -o "$STASH_TMP/firewall"
-echo '594bdf095e11aab2850100874d0e20af427e436c9ce8b54be81ddffdc252c01a  '"$STASH_TMP/manager.py" | sha256sum -c -
+echo '533813f1379d3bbac7ae7c860a7fed62d18771317cf0b4e81cbe0b79fe92250e  '"$STASH_TMP/manager.py" | sha256sum -c -
 echo '2222a6647e6f7e919e48865cd706a635dd1ca9d9aa9bf99dea3d992d28b13fe3  '"$STASH_TMP/firewall" | sha256sum -c -
 python3 -m py_compile "$STASH_TMP/manager.py"
 bash -n "$STASH_TMP/firewall"
@@ -361,6 +361,6 @@ if [[ "$STASH_TLS_OK" -ne 1 ]]; then
 fi
 rm -f "$STASH_STATE/.installing"
 echo
-echo 'Installed Clash split tunnel. First configure DNS: stash dns'
-echo 'Then create a client: new. Import its /mihomo.yaml URL into Clash, Rule mode.'
+echo 'Installed Stash fixed-DNS trial. First configure DNS: stash dns'
+echo 'Then create a client: new. Import its /config.yaml URL into Stash, Rule mode.'
 echo 'Verify the expected Control D resolver, YouTube playback and DIRECT browsing.'

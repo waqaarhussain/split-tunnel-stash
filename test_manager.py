@@ -31,7 +31,8 @@ class ManagerTests(unittest.TestCase):
         for item in self.patches:
             item.start()
         self.settings = {'endpoint': '203.0.113.8', 'server_private': 'SERVER_PRIVATE',
-                         'server_public': 'SERVER_PUBLIC', 'rules_source': m.SOURCE}
+                         'server_public': 'SERVER_PUBLIC', 'rules_source': m.SOURCE,
+                         'mihomo_doh': 'https://dns.controld.com/TEST_ONLY_ID'}
         m.save('settings.json', self.settings)
         m.save('clients.json', {})
         m.save('rules.json', {'rules': m.SEED, 'updated': 'seed', 'source': 'seed'})
@@ -113,7 +114,7 @@ class ManagerTests(unittest.TestCase):
     def test_config_uses_local_endpoint_system_dns_direct_default(self):
         self.add('TV')
         client = m.load('clients.json')['TV']
-        config = m.make_config(self.settings, client)
+        config = m.make_base_config(self.settings, client)
         self.assertEqual(config['proxies'][0]['server'], '203.0.113.8')
         self.assertEqual(config['proxies'][0]['port'], 51821)
         self.assertIn('203.0.113.8:8443/', config['rule-providers']['selected-service']['url'])
@@ -130,7 +131,7 @@ class ManagerTests(unittest.TestCase):
     def test_mihomo_trial_keeps_local_resolution_and_existing_peer(self):
         self.add('Phone')
         client = m.load('clients.json')['Phone']
-        config = m.make_mihomo_config(self.settings, client)
+        config = m.make_mihomo_config({k: v for k, v in self.settings.items() if k != 'mihomo_doh'}, client)
         self.assertFalse(config['proxies'][0]['remote-dns-resolve'])
         self.assertNotIn('dns', config['proxies'][0])
         self.assertEqual(config['dns']['nameserver'], ['system'])
@@ -161,6 +162,24 @@ class ManagerTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             m.set_dns('system')
         self.assertNotIn('mihomo_doh', m.load('settings.json'))
+
+    def test_stash_doh_profile_and_unchanged_clash_fallback(self):
+        self.add('Phone')
+        client = m.load('clients.json')['Phone']
+        config = m.make_config(self.settings, client)
+        for key in ('nameserver', 'proxy-server-nameserver'):
+            self.assertEqual(config['dns'][key], [self.settings['mihomo_doh']])
+        self.assertEqual(config['dns']['default-nameserver'], ['76.76.2.22'])
+        self.assertFalse(config['dns']['follow-rule'])
+        self.assertNotIn('fallback', config['dns'])
+        self.assertNotIn('dns', config['proxies'][0])
+        self.assertNotIn('remote-dns-resolve', config['proxies'][0])
+        self.assertEqual(config['rules'][0], 'DOMAIN,dns.controld.com,DIRECT')
+        self.assertEqual(config['rules'][-1], 'MATCH,DIRECT')
+        self.assertEqual(yaml.safe_load(yaml.safe_dump(config)), config)
+        no_dns = {k: v for k, v in self.settings.items() if k != 'mihomo_doh'}
+        with self.assertRaisesRegex(ValueError, 'stash dns'):
+            m.make_config(no_dns, client)
 
     def test_rule_validation_ignores_shared_ip_rules_and_rejects_injection(self):
         rules = m.parse_rules('payload:\n - DOMAIN-SUFFIX,youtube.com\n - IP-CIDR,1.0.0.0/8\n')

@@ -235,12 +235,14 @@ def show_url(name):
     clients, settings = load('clients.json'), load('settings.json')
     if name not in clients:
         raise ValueError('Unknown client')
-    url = subscription_base(settings, clients[name]) + '/mihomo.yaml'
-    print('Clash subscription URL (private):\n' + url)
-    print('Import into Clash as a remote profile. Use Rule mode.')
-    print('DNS: ' + ('explicit Control D DoH' if settings.get('mihomo_doh') else
-                      'system trial; run stash dns to set Control D DoH'))
-    print('Use one active app per client. Do not share private subscription URLs.')
+    base = subscription_base(settings, clients[name])
+    print('Stash TEST subscription URL (private):\n' + base + '/config.yaml')
+    print('In Stash: Configuration > Download from URL. Use Rule mode.')
+    print('Fixed Control D DNS: ' + ('configured' if settings.get('mihomo_doh') else
+                                      'missing; run stash dns before importing'))
+    print('\nExisting Clash fallback URL (private):\n' + base + '/mihomo.yaml')
+    print('Disconnect Clash before connecting Stash with this peer.')
+    print('TEST: verify Control D resolver ID, YouTube playback and DIRECT browsing.')
 
 
 def remove_client(name):
@@ -259,7 +261,7 @@ def subscription_base(settings, client):
             + '/s/' + client['token'])
 
 
-def make_config(settings, client):
+def make_base_config(settings, client):
     base = subscription_base(settings, client)
     return {
         'mode': 'rule', 'log-level': 'info', 'ipv6': False,
@@ -282,6 +284,19 @@ def make_config(settings, client):
                   'RULE-SET,selected-service,This VPS', 'MATCH,DIRECT']}
 
 
+def make_config(settings, client):
+    """Stash trial: explicit Control D DoH, with transport DNS guards retained."""
+    upstream = settings.get('mihomo_doh')
+    if not upstream:
+        raise ValueError('Set explicit Control D DNS first with stash dns')
+    config = make_base_config(settings, client)
+    config['dns'] = {'default-nameserver': ['76.76.2.22'],
+                     'nameserver': [upstream], 'proxy-server-nameserver': [upstream],
+                     'follow-rule': False, 'fake-ip-filter': ['*']}
+    config['rules'].insert(0, 'DOMAIN,dns.controld.com,DIRECT')
+    return config
+
+
 def set_dns(value):
     """Store an opt-in Control D DoH URL in private server state."""
     settings = load('settings.json')
@@ -292,12 +307,12 @@ def set_dns(value):
     else:
         raise ValueError('Use your https://dns.controld.com/ resolver URL or system')
     save('settings.json', settings)
-    print('Clash DNS updated. Refresh the imported profile and reconnect.')
+    print('Fixed Control D DNS updated. Refresh the full profile and reconnect.')
 
 
 def make_mihomo_config(settings, client):
     """Optional client trial with local resolution or explicit Control D DoH."""
-    config = make_config(settings, client)
+    config = make_base_config(settings, client)
     config['dns'] = {'enable': True, 'nameserver': ['system'],
                      'default-nameserver': ['system'], 'respect-rules': False,
                      'enhanced-mode': 'fake-ip', 'fake-ip-range': '198.18.0.1/16'}
@@ -365,7 +380,7 @@ class Gateway(BaseHTTPRequestHandler):
 def status():
     clients = load('clients.json')
     metadata = load('rules.json')
-    print('Clash split tunnel: iPhone playback reported working; Apple TV acceptance pending.')
+    print('Stash fixed-DNS test: YouTube playback and transport DNS require device validation.')
     print('Clash DNS: ' + ('explicit Control D DoH' if load('settings.json').get('mihomo_doh') else 'system trial (not encrypted-profile inheritance)'))
     print('Endpoint: ' + load('settings.json')['endpoint'])
     print('Clients: ' + str(len(clients)))

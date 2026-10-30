@@ -1,133 +1,86 @@
 # Split Tunnel Stash
 
-**Baseline copy for upcoming Stash work. This currently contains the Clash implementation, not a completed Stash client profile. Do not import mihomo.yaml into Stash assuming compatibility.**
+Stash trial using a fixed Control D DNS-over-HTTPS resolver, YouTube domain routing through this VPS's WireGuard exit, and DIRECT routing for other destinations. Import a private URL once; the server's rule catalog refreshes on the hour and half hour, with a client fetch interval of 1800 seconds.
 
-Copied from split-tunnel-clash commit `8f5882112c8c6ec579089d3e4c2b4e3bd19edc12`. Server code, firewall, DNS-setting support, helpers and tests are preserved. The installer fetches code from this repository. The legacy /config.yaml endpoint still has the earlier Stash system-DNS experiment; explicit Control D DNS adaptation and the separate WireGuard resolver issue must be tested next.
+**Device testing required.** The earlier Stash system-DNS profile failed: captures showed the WireGuard adapter making separate remote DNS lookups. This version tests explicit Control D DoH in Stash's main DNS configuration. It does not claim that setting main DNS also disables the adapter's own resolver. Remote DNS firewall guards remain in place. If YouTube fails or those guard counters increase, the separate adapter DNS issue remains unresolved. Do not treat Control D verification alone as proof that playback DNS is correct.
 
-The copies share server ports, service names and state paths. Do not install them alongside each other on the working VPS. Keep the current Clash setup available while developing these client variants.
+## Test on the existing Clash VPS
 
----
-
-# Split Tunnel Clash
-
-YouTube domain rules select connections for this VPS's own WireGuard exit. Other connections use DIRECT through the device's normal network. Import one private profile URL into Clash; domain rules refresh centrally. This repository preserves the current Clash setup. The original [wireguard-server](https://github.com/waqaarhussain/wireguard-server) full-tunnel baseline is unchanged.
-
-**Current evidence:** the VPS installation and handshake succeeded, and the user reports YouTube and explicit Control D DNS working on iPhone after reimporting the updated profile. Apple TV playback, exhaustive YouTube coverage and long-term reliability remain unverified. The system-DNS experiment did not preserve the iPhone's installed encrypted DNS profile. This setup therefore selects a fixed Control D DoH URL explicitly; it does not automatically inherit arbitrary device DNS.
-
-## Install on a new VPS
-
-Requires Debian/Ubuntu, APT, systemd, root and an existing `curl` command. Inbound TCP 80/8443 and UDP 51821 must be reachable through host and provider firewalls.
+No VPS reset, new client or fresh installation is needed. Keep the saved working Clash profile. Run as root:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/waqaarhussain/split-tunnel-stash/main/install.sh -o /tmp/split-tunnel-install.sh && bash /tmp/split-tunnel-install.sh
+curl -fsSL https://raw.githubusercontent.com/waqaarhussain/split-tunnel-stash/main/update.sh -o /tmp/stash-test-update.sh && bash /tmp/stash-test-update.sh
 ```
 
-Then configure your Control D resolver:
+The updater reuses the Control D DoH URL already saved by `stash dns`. If absent, it prompts for the URL. Personal resolver IDs are saved only in private VPS state, never GitHub. Keep YouTube redirect disabled in that Control D profile.
 
-```bash
-stash dns
-```
+The updater downloads and checksum-checks the manager, compiles it, validates generated Stash configs and compares the existing Clash output before replacing the installed manager. It saves a root-only manager backup and restarts only stash-subscriptions. A failed service restart or backend health check restores the previously installed manager. It does not change peer keys, client tokens, WireGuard, firewall, HTTPS or Nginx configuration.
 
-Paste your full `https://dns.controld.com/…` DoH URL. This is saved in private VPS state, never in GitHub. Keep YouTube redirect disabled in that Control D profile so it returns real destination addresses. The setting applies to this VPS's Clash subscriptions.
-
-Create a device client:
-
-```bash
-new
-```
-
-Names can include spaces and apostrophes. Import the resulting **Clash subscription URL ending in `/mihomo.yaml`** into Clash as a remote profile, select it, and use Rule mode. Create one client per device. Never run the same peer concurrently in two apps.
-
-[Clash App Store listing](https://apps.apple.com/gb/app/clash-rule-based-proxy/id6794257189) lists iPhone, iPad and Apple TV; actual availability on the user's Apple TV has not been confirmed.
-
-## Existing installation
-
-Do not rerun the installer on the working VPS. It refuses to overwrite initialized keys and clients. Renaming the GitHub repository does not change your VPS subscription URLs, peer keys, DNS setting or client names. Legacy `stash` helper names, `wg-stash`, systemd units and private state paths intentionally remain stable.
-
-To display an existing client's URL:
+Then run:
 
 ```bash
 stash url
 ```
 
-When DNS or profile fields change, refresh the full remote profile, not only its rules. If the app retains the old source, disconnect and remove/reimport the same URL. For the fixed-DNS setup, verify that `dns.nameserver` contains the intended Control D HTTPS URL before reconnecting.
+Choose the existing device. Import the **Stash TEST subscription URL ending in `/config.yaml`** into Stash using Configuration > Download from URL. Use Rule mode. This is a different URL suffix from Clash's `/mihomo.yaml`. Disconnect Clash before connecting Stash with the same peer. Do not run both simultaneously.
 
-## DNS and routing
+If an earlier Stash profile exists, remove it and import this URL afresh. Check that its `dns.nameserver` and `dns.proxy-server-nameserver` contain the intended Control D HTTPS URL, not `system`. The DNS bootstrap uses Control D's documented `76.76.2.22` address; ordinary destination lookups have no fallback provider. `follow-rule: false` requests direct DNS connections. The existing main-DNS real-answer mode is retained for this isolated test. No undocumented Mihomo-only fields are added to the Stash adapter.
 
-The Clash profile uses the explicit Control D DoH address for ordinary destinations, DIRECT destinations and proxy hostnames. DNS connects directly (`respect-rules: false`). Only the DoH hostname's bootstrap lookup uses Control D's documented `76.76.2.22` resolver. There is no ordinary-destination fallback to another provider. WireGuard's `remote-dns-resolve` is explicitly false.
+## Device acceptance
 
-Fake-IP mapping inside Clash associates connections with domain rules. Matching service domains use `This VPS`; the final rule is `MATCH,DIRECT`. This does not rewrite YouTube DNS answers to the SNI proxy IP, and it does not build a list of real YouTube IP routes.
+1. Confirm Control D reports the expected resolver ID while Stash is connected.
+2. Fully close and reopen YouTube; test thumbnails, sign-in and actual video playback.
+3. Check Stash connections: matching service hostnames should use This VPS. Unrelated browsing should use DIRECT.
+4. Compare `stash status` DNS rejection counters before and after playback. A handshake alone does not establish success.
+5. If playback fails, capture only DNS traffic with `timeout 20 tcpdump -nn -i wg-stash -c 8 'port 53 or port 853'` while opening YouTube. Do not publish complete configs or private keys.
 
-`stash dns system` removes the fixed resolver override. That restores the earlier trial, not a guarantee that Apple encrypted DNS configuration profiles are inherited. No private Control D resolver ID is embedded in this repository.
+The domain catalog is community maintained, not Control D's own service catalog. Unknown hostnames can go direct; shared hostnames match regardless of which app requests them. Complete YouTube coverage and Apple TV behavior still need device tests.
 
-## Rules and scheduling
+## Return to Clash
 
-The default source is the community-maintained [blackmatrix7 YouTube domain catalog](https://github.com/blackmatrix7/ios_rule_script/blob/master/rule/Clash/YouTube/YouTube.yaml). Only validated DOMAIN, DOMAIN-SUFFIX and DOMAIN-KEYWORD entries are accepted; shared IP ranges are excluded. A small bundled seed covers initial download failure; subsequent failures retain the last good list.
+Disconnect Stash and reconnect the saved Clash profile. Its endpoint and generated profile output are retained. To restore the original subscription manager too:
 
-The list is not Control D's proprietary service catalog and is not guaranteed exhaustive. Shared hostnames can also be used by other Google functions; traffic to a matching hostname takes the same route regardless of which app requested it. Unknown or unclassified destinations can go direct.
+```bash
+bash /tmp/stash-test-update.sh rollback
+```
 
-| Operation | Timing |
-| --- | --- |
-| VPS refreshes the upstream catalog | Every hour at :00 and :30, in the VPS timezone |
-| Client fetches the private rule provider | 1800 seconds, subject to app and OS scheduling |
-| Server health check | Every five minutes |
-| DNS or full profile changes | Refresh the full imported profile and reconnect |
+The first original backup is `/var/lib/stash-split-tunnel/manager-before-stash-test.py`. Repeated test updates do not overwrite it. Existing client URLs and keys remain valid.
 
-Existing connections and DNS caches may persist across rule updates. The health timer recovers missing project services; it does not restart idle peers. Old handshakes are normal, and restarting the server cannot clear device caches.
+## Fresh VPS installation
 
-Add extra domain suffixes to `/var/lib/stash-split-tunnel/domains.txt`, one per line. Each VPS uses its own detected public IPv4 as the tunnel endpoint and its own egress. Service selection never sends traffic through a hardcoded external proxy.
+On a new Debian/Ubuntu VPS only:
 
-## Helpers
+```bash
+curl -fsSL https://raw.githubusercontent.com/waqaarhussain/split-tunnel-stash/main/install.sh -o /tmp/stash-install.sh && bash /tmp/stash-install.sh
+```
+
+Then run `stash dns`, paste the fixed Control D DoH URL, and run `new`. Import the `/config.yaml` URL into Stash. Public TCP 80/8443 and UDP 51821 must be reachable, including provider firewall rules. `curl`, root and systemd are required. The installer detects this VPS's public IPv4; no exit IP is hardcoded.
+
+Existing Nginx SNI on TCP 443 and wg0 on UDP 51820 are preserved. The project uses wg-stash, 10.88.0.0/24, UDP 51821 and separate trusted HTTPS on TCP 8443. Nginx gets a backed-up, syntax-checked HTTP ACME route and a graceful reload. Certificates require TCP 80 for renewal; certificate verification is never bypassed. Preserve `/var/lib/stash-https`.
+
+The dedicated firewall blocks tunnel access to the VPS itself, private destinations and forwarded DNS on ports 53/853. NAT only applies to this project's subnet. No firewall block is removed for this DNS test. The health timer recovers missing project services, not idle peers; it never periodically reboots the VPN to flush client caches.
+
+## Management
 
 | Command | Action |
 | --- | --- |
-| `new` | Create a client and print its Clash URL |
+| `new` | Create a named client and print Stash and Clash URLs |
+| `stash url` | Show existing URLs |
+| `stash dns` | Set fixed Control D DoH for both profile formats |
 | `stash list` | List clients |
-| `stash url` | Select a client and show its existing URL |
 | `stash remove` | Confirm removal and revoke peer and URL |
-| `stash dns` | Set the private Control D DoH URL |
-| `stash dns system` | Restore system-DNS trial |
-| `stash rules` | Refresh the catalog now |
-| `stash service youtube` | Select YouTube catalog |
-| `stash service netflix` | Select Netflix catalog for a separate service experiment |
-| `stash service custom` | Use only domains.txt entries |
-| `stash status` | Services, DNS mode, rule age, handshakes and firewall counters |
+| `stash rules` | Refresh the upstream domain catalog |
+| `stash service youtube` | Use YouTube catalog |
+| `stash service netflix` | Select Netflix catalog for a separate experiment |
+| `stash service custom` | Use only domains.txt |
+| `stash status` | Services, DNS mode, rule age, handshakes and DNS guards |
 
-Names may also be passed directly, for example `stash url 'Family iPad'`. Peer updates use `wg syncconf` with rollback on failure. Client operations are serialized.
+`stash dns system` removes the explicit DNS override. The Stash fixed-DNS endpoint then refuses to generate a profile until a fixed resolver is set again; Clash retains its earlier system-DNS trial behavior.
 
-## Existing SNI and WireGuard coexistence
+Private settings, clients and extra suffixes are under `/var/lib/stash-split-tunnel`. These legacy paths and systemd names are deliberately retained for compatibility. Do not install multiple repository copies on the same VPS. Subscription URLs grant access to client private keys; keep them private. Removing a client revokes its peer and both profile URLs.
 
-The project uses `wg-stash`, subnet `10.88.0.0/24`, UDP 51821 and private subscription HTTPS on TCP 8443. It preserves the existing `wg0` and Nginx SNI stream on TCP 443. The installer checks port/subnet conflicts before changes.
+## Related repositories and validation
 
-For Nginx, a root-only configuration backup is made before adding a separate port-80 ACME challenge virtual host for the VPS IP. It syntax-checks Nginx, gracefully reloads and checks the challenge route; failures roll back that added route. The existing stream configuration is not edited. Original `wg0` and SNI file hashes and the running `wg0` public key are checked before completion.
+[Clash baseline](https://github.com/waqaarhussain/split-tunnel-clash) remains separate and unchanged by this test. [Shadowrocket copy](https://github.com/waqaarhussain/split-tunnel-shadowrocket) is separate future work. [Original WireGuard baseline](https://github.com/waqaarhussain/wireguard-server) is unchanged.
 
-The installer extracts Caddy from the official signed stable APT package without starting the global caddy.service. The separate stash-https service requests a trusted short-lived Let's Encrypt IP certificate. Public TCP 80 must remain reachable for renewal. Certificate checks are never disabled. Keep `/var/lib/stash-https` intact across reboots.
-
-The dedicated tunnel firewall blocks access to the VPS itself, private destinations and forwarded DNS on ports 53/853. NAT applies only to this project's subnet. These blocks cannot establish that every HTTPS connection is free of encrypted DNS.
-
-## Private state and diagnostics
-
-Private state lives under `/var/lib/stash-split-tunnel`, and the server configuration is `/etc/wireguard/wg-stash.conf`. Subscription URLs contain bearer tokens and return a client private key. Keep them confidential. The backend listens on loopback, logs no token-bearing paths and exposes no admin endpoints. Removing a client revokes both its peer and subscription access.
-
-```bash
-stash status
-wg show wg-stash
-systemctl list-timers 'stash-*'
-journalctl -u stash-https -n 50 --no-pager
-journalctl -u stash-subscriptions -n 50 --no-pager
-```
-
-A different public IP requires deliberate endpoint and certificate migration; existing IP-based URLs do not follow a new VPS automatically. A failed partial installation may be resumed using its installation marker; a completed installation must not be used as an update mechanism.
-
-## Test copies
-
-- [split-tunnel-shadowrocket](https://github.com/waqaarhussain/split-tunnel-shadowrocket): independent baseline copy for future native Shadowrocket profile work.
-- [split-tunnel-stash](https://github.com/waqaarhussain/split-tunnel-stash): independent baseline copy for the Stash DNS/transport experiment.
-
-These repositories initially copy the Clash baseline. Creating a copy does not make the existing profile compatible with another app. Do not install multiple copies on the same VPS: they share legacy service names, ports and state paths. App-specific changes and tests come next. The old `/config.yaml` Stash experimental endpoint remains for compatibility; its fixed-DNS behavior is not implemented or validated in this Clash baseline.
-
-## Validation
-
-Run `python3 -m unittest -q` and `bash -n install.sh firewall`. Tests cover peer/key isolation, URL authentication and revocation, names, failed sync rollback, domain validation, last-good rules, Control D URL validation and system reset, Clash profile fields, simulated firewall idempotence and Nginx challenge routing/rollback. These are not device acceptance tests.
-
-On each device, verify the expected Control D resolver ID, actual YouTube playback, matching connections through This VPS and unrelated browsing through DIRECT. A browser public-IP check only describes that request, not YouTube's route. Apple TV and complete domain coverage still require direct testing.
+Run `python3 -m unittest -q` and `bash -n install.sh firewall update.sh`. Tests cover DNS fields, missing fixed resolver, retained Clash fields, keys and peers, authenticated URLs, revocation, domain rules, rollback and simulated firewall/Nginx behavior. The updater additionally compares actual per-client Clash documents on the target VPS before installation. Neither local tests nor source inspection replace Stash playback and DNS tests on the device.
