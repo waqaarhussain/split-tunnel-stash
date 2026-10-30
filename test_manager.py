@@ -104,11 +104,17 @@ class ManagerTests(unittest.TestCase):
         m.save('settings.json', dict(self.settings, stash_proxy_enabled=True))
         with patch.object(m.sys, 'argv', ['manager.py', 'new']), \
              patch('builtins.input', side_effect=['My TV', 'https://dns.controld.com/TV_ONLY_TEST']) as prompts, \
-             patch.object(m, 'run', side_effect=self.fake_run), contextlib.redirect_stdout(io.StringIO()):
+             patch.object(m, 'run', side_effect=self.fake_run), contextlib.redirect_stdout(io.StringIO()) as output:
             m.main()
         self.assertEqual(prompts.call_count, 2)
         client = m.load('clients.json')['My TV']
         self.assertEqual(client['dns_url'], 'https://dns.controld.com/TV_ONLY_TEST')
+        expected = m.subscription_base(m.load('settings.json'), client) + '/config.yaml\n'
+        self.assertEqual(output.getvalue(), expected)
+        with patch.object(m.sys, 'argv', ['manager.py', 'link']), \
+             patch('builtins.input', return_value='1'), contextlib.redirect_stdout(io.StringIO()) as output:
+            m.main()
+        self.assertEqual(output.getvalue(), '1. My TV\n' + expected)
         server = m.ThreadingHTTPServer(('127.0.0.1', 0), m.Gateway)
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()

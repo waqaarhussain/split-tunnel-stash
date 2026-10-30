@@ -233,7 +233,6 @@ def add_client(name, dns_url=None):
     export_directory(name)
     apply_clients(settings, clients)
     export_client(name, settings, clients[name])
-    print('Created: ' + name)
     show_url(name)
 
 
@@ -241,14 +240,7 @@ def show_url(name):
     clients, settings = load('clients.json'), load('settings.json')
     if name not in clients:
         raise ValueError('Unknown client')
-    base = subscription_base(settings, clients[name])
-    print('Stash subscription URL (private):\n' + base + '/config.yaml')
-    print('In Stash: Configuration > Download from URL. Use Rule mode.')
-    print('Client Control D DNS: configured' if client_dns(settings, clients[name]) else 'Client DNS missing')
-    print('Saved YAML: ' + str(EXPORT_ROOT / name / 'config.yaml'))
-    print('\nExisting Clash fallback URL (private):\n' + base + '/mihomo.yaml')
-    print('Disconnect Clash before connecting Stash with this peer.')
-    print('Verify Control D resolver ID, YouTube playback and DIRECT browsing.')
+    print(subscription_base(settings, clients[name]) + '/config.yaml')
 
 
 def remove_client(name):
@@ -504,7 +496,7 @@ def choose_client():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['init', 'new', 'remove', 'url', 'list', 'rules', 'service', 'dns', 'client-dns', 'export', 'status', 'serve'])
+    parser.add_argument('command', choices=['init', 'new', 'remove', 'url', 'link', 'list', 'rules', 'service', 'dns', 'client-dns', 'export', 'status', 'serve'])
     parser.add_argument('value', nargs='?')
     args = parser.parse_args()
     if args.command == 'serve':
@@ -519,7 +511,7 @@ def main():
             add_client(name, validate_dns(input('This device Control D DoH URL: ').strip()))
         elif args.command == 'remove':
             remove_client(args.value or choose_client())
-        elif args.command == 'url':
+        elif args.command in ('url', 'link'):
             show_url(args.value or choose_client())
         elif args.command == 'list':
             print('\n'.join(sorted(load('clients.json'))) or 'No clients')

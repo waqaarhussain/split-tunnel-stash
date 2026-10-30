@@ -43,7 +43,7 @@ for STASH_FILE in manager.py https_proxy.py proxy-firewall; do
     curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 "$STASH_SOURCE/$STASH_FILE" -o "$STASH_TMP/$STASH_FILE"
 done
 # DIGESTS_BEGIN
-echo '04ab0b920d2b5200268ef97b201739b361299f18d9b46564f4f3f628a12afbd6  '"$STASH_TMP/manager.py" | sha256sum -c -
+echo '338880104084a0692d10b6c3c1be6ee7176cd70bb993d34a50dea73c8fe11ac6  '"$STASH_TMP/manager.py" | sha256sum -c -
 echo '63199a453a54d206082ccea79ee19ed66c1baf2d3ce73d8247746b55db2619d9  '"$STASH_TMP/https_proxy.py" | sha256sum -c -
 echo 'dbf1eb55814523858759dfeea5355a1d0c444e3e235b52d392efda3d67791bd5  '"$STASH_TMP/proxy-firewall" | sha256sum -c -
 # DIGESTS_END
@@ -191,6 +191,11 @@ cat > /usr/local/bin/new <<'HELPER'
 exec /usr/local/bin/stash new "$@"
 HELPER
 chmod 755 /usr/local/bin/new
+cat > /usr/local/bin/link <<'HELPER'
+#!/bin/bash
+exec /usr/local/bin/stash link "$@"
+HELPER
+chmod 755 /usr/local/bin/link
 systemctl restart stash-subscriptions
 curl --noproxy '*' -fsS --retry 5 --retry-connrefused --retry-delay 1 --max-time 3 http://127.0.0.1:8765/health >/dev/null
 trap - ERR

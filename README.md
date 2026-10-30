@@ -36,9 +36,9 @@ Each client gets its own credentials, DNS URL, private subscription URL and YAML
 
 Folders are administrator-only (0700), YAML files are 0600. Private DNS IDs and credentials are stored on the VPS, never in this repository. The subscription gateway renders from private state; it does not need access to the home folders. Exported YAML is a copy of the client's current profile, with the same private rule-provider URL.
 
-Copy the printed **Stash subscription URL ending in `/config.yaml`** into Stash > Configuration > Download from URL, then select Rule mode. Disconnect Clash before connecting Stash with the same client. The profile includes all proxy authentication; no password needs manual entry. Use a separate client for each device.
+After the prompts, `new` prints only the private Stash config URL on its own line. Copy that URL, ending in `/config.yaml`, into Stash > Configuration > Download from URL, then select Rule mode. Disconnect Clash before connecting Stash with the same client. The profile includes all proxy authentication; no password needs manual entry. Use a separate client for each device.
 
-Existing clients can be shown with `stash url`. To change one device's resolver:
+Run `link` to see a numbered device list. Choose its number to print only that device's private config URL. `stash url` also remains available. To change one device's resolver:
 
 ```bash
 stash client-dns
@@ -74,7 +74,8 @@ The relay supports public IPv4 TCP destinations on port 443. Stash blocks proxie
 | Command | Action |
 | --- | --- |
 | `new` | Ask for client name and device Control D DoH URL; create credentials, YAML and private URL |
-| `stash url` | Show the selected client's private Stash URL and retained Clash fallback URL |
+| `link` | Select a device by number and print only its private config URL |
+| `stash url` | Same config URL picker for compatibility |
 | `stash client-dns` | Change a selected Stash client's resolver and regenerate its YAML |
 | `stash export` | Migrate legacy resolver choices and regenerate private YAML copies |
 | `stash list` | List clients |

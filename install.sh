@@ -47,7 +47,7 @@ STASH_SOURCE='https://raw.githubusercontent.com/waqaarhussain/split-tunnel-stash
 # or mismatched download after a failed/mid-update fetch.
 curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 "$STASH_SOURCE/manager.py" -o "$STASH_TMP/manager.py"
 curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 "$STASH_SOURCE/firewall" -o "$STASH_TMP/firewall"
-echo '04ab0b920d2b5200268ef97b201739b361299f18d9b46564f4f3f628a12afbd6  '"$STASH_TMP/manager.py" | sha256sum -c -
+echo '338880104084a0692d10b6c3c1be6ee7176cd70bb993d34a50dea73c8fe11ac6  '"$STASH_TMP/manager.py" | sha256sum -c -
 echo '2222a6647e6f7e919e48865cd706a635dd1ca9d9aa9bf99dea3d992d28b13fe3  '"$STASH_TMP/firewall" | sha256sum -c -
 python3 -m py_compile "$STASH_TMP/manager.py"
 bash -n "$STASH_TMP/firewall"
@@ -88,6 +88,11 @@ cat > /usr/local/bin/new <<'EOF'
 exec /usr/local/bin/stash new "$@"
 EOF
 chmod 755 /usr/local/bin/new
+cat > /usr/local/bin/link <<'EOF'
+#!/bin/bash
+exec /usr/local/bin/stash link "$@"
+EOF
+chmod 755 /usr/local/bin/link
 if [[ -e "$STASH_STATE/settings.json" ]]; then
     for STASH_EXISTING in clients.json rules.json domains.txt; do
         [[ -f "$STASH_STATE/$STASH_EXISTING" ]] || { echo 'Incomplete initialization. Preserve the state directory and inspect it before retrying.' >&2; exit 1; }
@@ -363,6 +368,6 @@ rm -f "$STASH_STATE/.installing"
 echo
 echo 'Base installed. Configuring the Stash HTTPS transport...'
 curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 "$STASH_SOURCE/proxy-setup.sh" -o "$STASH_TMP/proxy-setup.sh"
-echo '25071b7a9f0bc3d84bddc767e93c6bf3c02b0ce3f9a08f67e7a74fb61623b6bb  '"$STASH_TMP/proxy-setup.sh" | sha256sum -c -
+echo 'da68e57db7e2635048e5adb7f0acd803fd41822403b169c3688bd83c90519e74  '"$STASH_TMP/proxy-setup.sh" | sha256sum -c -
 STASH_SOURCE="$STASH_SOURCE" bash "$STASH_TMP/proxy-setup.sh"
 echo 'Create a device client with new, then import its /config.yaml URL into Stash.'
